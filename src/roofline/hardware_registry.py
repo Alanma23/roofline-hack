@@ -33,23 +33,25 @@ BLACKWELL_B200 = HardwareSpec(
     },
 )
 
-# B10 desktop/workstation Blackwell — placeholder specs, user overrides
+# GB10 Grace Blackwell (ASUS Ascent GX10) — measured specs from ServeTheHome
+# 128GB LPDDR5X @ 9400MT/s, 256-bit bus = 273-301 GB/s bandwidth
+# 31 TFLOPS FP32, 1000 TFLOPS FP4 (dense), 1 PFLOP FP4 (sparse)
 BLACKWELL_B10 = HardwareSpec(
-    name="NVIDIA Blackwell B10",
-    peak_bandwidth_gb_s=1000.0,  # placeholder — update with real specs
+    name="NVIDIA GB10 Grace Blackwell (GX10)",
+    peak_bandwidth_gb_s=287.0,  # LPDDR5X 9400MT/s, 256-bit
     peak_flops_tflops={
-        "FP64": 5.0,
-        "FP32": 10.0,
-        "TF32": 100.0,
-        "BF16": 200.0,
-        "FP16": 200.0,
-        "FP8_E4M3": 400.0,
-        "FP8_E5M2": 400.0,
-        "NVFP4": 800.0,
-        "MXFP4": 800.0,
-        "MXFP8": 400.0,
-        "INT8": 400.0,
-        "INT4": 800.0,
+        "FP64": 15.5,  # ~FP32/2
+        "FP32": 31.0,  # measured
+        "TF32": 62.0,  # ~2×FP32 (tensor cores)
+        "BF16": 62.0,  # ~2×FP32
+        "FP16": 62.0,  # ~2×FP32
+        "FP8_E4M3": 124.0,  # ~2×FP16
+        "FP8_E5M2": 124.0,  # ~2×FP16
+        "NVFP4": 1000.0,  # measured dense FP4
+        "MXFP4": 1000.0,  # similar to NVFP4
+        "MXFP8": 124.0,  # similar to FP8
+        "INT8": 124.0,  # ~2×FP16
+        "INT4": 248.0,  # ~2×INT8
     },
 )
 

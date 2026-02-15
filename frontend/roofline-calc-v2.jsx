@@ -92,8 +92,6 @@ function numLevels(fmt) {
 //  HARDWARE PRESETS
 // ═══════════════════════════════════════════════
 const HW_PRESETS = {
-  "Jetson Nano":   { bw: 25.6, bwRange:[22,26], flops:{FP32:.47,FP16:.47,BF16:0,FP8_E4M3:0,NVFP4:0,MXFP4:0,INT8:0,INT4:0}, note:"Maxwell SM53 · No tensor cores" },
-  "Jetson Orin Nano": { bw: 60, bwRange:[50,68], flops:{FP32:1.3,FP16:2.7,BF16:0,FP8_E4M3:0,NVFP4:0,MXFP4:0,INT8:5.5,INT4:0}, note:"Ampere · 8GB shared · INT8/INT4 (W4A16)" },
   "A100 SXM":      { bw: 2039, bwRange:[1900,2100], flops:{FP32:19.5,FP16:312,BF16:312,FP8_E4M3:0,NVFP4:0,MXFP4:0,INT8:624,INT4:0}, note:"Ampere · 3rd-gen TC · HBM2e" },
   "H100 SXM":      { bw: 3350, bwRange:[3100,3400], flops:{FP32:67,FP16:134,BF16:134,FP8_E4M3:1979,NVFP4:0,MXFP4:0,INT8:1979,INT4:3958}, note:"Hopper · FP8 TC · HBM3" },
   "GB10 Blackwell": { bw: 1000, bwRange:[800,1200], flops:{FP32:10,FP16:200,BF16:200,FP8_E4M3:400,NVFP4:800,MXFP4:800,INT8:400,INT4:800}, note:"Blackwell B10 · Desktop · Placeholder specs" },
@@ -498,9 +496,8 @@ function OpTable({ ops, hw }) {
 //  WHAT TO DO PANEL — roofline-driven quantization recommendation
 // ═══════════════════════════════════════════════
 function WhatToDoPanel({ bound, aggAI, hw, hwName, cfg, peakT }) {
-  const isJetson = hwName.includes("Jetson");
   const isBlackwell = hwName.includes("B10") || hwName.includes("B200") || hwName.includes("B300") || hwName.includes("Blackwell");
-  const criticalAI = peakT > 0 && hw.bw > 0 ? (peakT * 1e12) / (hw.bw * 1e9) : 45;
+  const criticalAI = peakT > 0 && hw.bw > 0 ? (peakT * 1e12) / (hw.bw * 1e9) : 200;
   const memBound = bound === "MEMORY";
   const wBits = effectiveBitsPerElement(cfg?.w || "FP16");
 
@@ -520,10 +517,6 @@ function WhatToDoPanel({ bound, aggAI, hw, hwName, cfg, peakT }) {
         recMethod = "Optimal";
         recNote = "Already using FP4 weights. Consider FP4 KV cache for additional savings.";
       }
-    } else if (isJetson) {
-      recPrec = "INT4 (W4A16)";
-      recMethod = "PTQ or AWQ";
-      recNote = "Memory-bound → INT4 gives ~4× speedup. Use AWQ for better accuracy.";
     } else {
       recPrec = "FP8_E4M3 or NVFP4";
       recMethod = "Native FP8/FP4";

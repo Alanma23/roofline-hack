@@ -1,8 +1,18 @@
 # Documentation Index
 
-| Doc | Description |
-|-----|-------------|
-| [README.md](../README.md) | Main project overview, theory, run instructions |
-| [THEORY_MATH.md](THEORY_MATH.md) | Per-operator FLOP/byte derivations (attention, FFN, KV cache) |
-| [THEORY_FORMATS.md](THEORY_FORMATS.md) | Precision format catalog (FP8, NVFP4, MXFP4, NF4, etc.) |
-| [TORCHAO.md](TORCHAO.md) | TorchAO integration, precision mapping, API |
+## Core Documentation
+
+- **[README.md](../README.md)** - Main project documentation, quick start, examples
+- **[THEORY.md](../THEORY.md)** - Deep dive into roofline model, precision formats, and per-operator math
+- **[GUIDE.md](../GUIDE.md)** - Implementation guide with formulas and validation strategy
+
+## Additional Resources
+
+- **[TORCHAO.md](TORCHAO.md)** - TorchAO quantization integration details
+
+## Quick Links
+
+- Hardware specs: See README.md § Hardware
+- Precision formats: See THEORY.md § Precision Format Catalog
+- Roofline formulas: See THEORY.md § Roofline Model Fundamentals
+- Code examples: See README.md § Example Usage
