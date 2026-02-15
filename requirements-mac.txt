@@ -1,0 +1,15 @@
+# Minimal deps for M3 Pro (no NVIDIA GPU)
+# Use: pip install -r requirements-mac.txt
+
+torch>=2.1
+torchao>=0.5
+transformers>=4.35
+accelerate>=0.24
+pandas>=2.0
+numpy>=1.24
+
+fastapi>=0.100
+uvicorn[standard]>=0.20
+pydantic>=2.0
+
+# pynvml omitted — NVML is NVIDIA-only; /api/nvml/status will 503

@@ -20,7 +20,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -86,6 +86,12 @@ def _has_cuda() -> bool:
 # ═══════════════════════════════════════════════
 #  ENDPOINTS
 # ═══════════════════════════════════════════════
+
+@app.get("/")
+def root():
+    """Redirect to API docs."""
+    return RedirectResponse(url="/docs", status_code=302)
+
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 def analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10"):

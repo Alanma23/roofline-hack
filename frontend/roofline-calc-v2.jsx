@@ -208,6 +208,29 @@ function attainable(ai, peakTFlops, bwGBs) {
 }
 
 // ═══════════════════════════════════════════════
+//  RULE-BASED OPTIMIZATION GUIDE
+// ═══════════════════════════════════════════════
+const OPTIMIZATION_RULES = [
+  { keywords: ["speed up decode", "faster decode", "decode faster"], message: "Decode is memory-bound. Try NVFP4 W4A16 or INT4 for ~4x speedup. Lower KV cache to NVFP4_KV for long context.", highlight: ["precision_config", "what_to_do"] },
+  { keywords: ["memory bound", "why memory", "memory bottleneck"], message: "AI < Critical AI means bandwidth limits. Try lower precision (FP8, INT4) to reduce bytes.", highlight: ["what_to_do", "roofline_plot"] },
+  { keywords: ["long context", "kv cache", "kv memory"], message: "KV cache grows with sequence length. Use NVFP4 KV or INT4 KV to reduce memory; see Format Reference.", highlight: ["precision_config", "what_to_do"] },
+  { keywords: ["which precision", "what precision", "best precision"], message: "Check the What to do panel for recommendations. Memory-bound → lower precision; compute-bound → FP8/NVFP4.", highlight: ["what_to_do"] },
+  { keywords: ["validate", "measure", "measured", "benchmark"], message: "Use Kernel Spot Check to analyze a single shape. With GPU, measured points appear on the roofline.", highlight: ["kernel_analyzer"] },
+  { keywords: ["optimize", "optimization", "improve"], message: "Start with the What to do panel. For decode: lower precision. For prefill: FP8 or NVFP4 if compute-bound.", highlight: ["what_to_do"] },
+  { keywords: ["bottleneck", "bound"], message: "Memory-bound = bandwidth limits; lower precision helps. Compute-bound = FLOPS limits; higher precision throughput helps.", highlight: ["what_to_do", "roofline_plot"] },
+];
+
+function getOptimizationResponse(query) {
+  const q = query.toLowerCase().trim();
+  for (const rule of OPTIMIZATION_RULES) {
+    if (rule.keywords.some(kw => q.includes(kw))) {
+      return { message: rule.message, highlightSection: rule.highlight?.[0], suggestedConfig: null };
+    }
+  }
+  return { message: "Try: 'How can I speed up decode?' or 'Why is it memory bound?' Check the What to do panel for recommendations.", highlightSection: "what_to_do" };
+}
+
+// ═══════════════════════════════════════════════
 //  NL PARSER
 // ═══════════════════════════════════════════════
 async function parseNL(text) {
@@ -550,11 +573,29 @@ function WhatToDoPanel({ bound, aggAI, hw, hwName, cfg, peakT }) {
 }
 
 // ═══════════════════════════════════════════════
-//  GEMM ANALYZER PANEL — submit kernel, see dual roofline
+//  HW NAME → API KEY
 // ═══════════════════════════════════════════════
-const API_BASE = "http://localhost:8000";
+const HW_NAME_TO_API_KEY = {
+  "GB10 Blackwell": "b10",
+  "B200": "b200",
+  "H100 SXM": "h100",
+  "A100 SXM": "a100",
+  "B300 Ultra": "b10",
+  "Custom ASIC": "b10",
+};
 
-function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints }) {
+// ═══════════════════════════════════════════════
+//  GEMM ANALYZER — Kernel Spot Check
+// ═══════════════════════════════════════════════
+const API_BASE = ""; // use Vite proxy to localhost:8000
+
+const QUICK_SHAPES = [
+  { label: "Decode", M: 1, N: 4096, K: 4096 },
+  { label: "FFN up", M: 1, N: 4096, K: 14336 },
+  { label: "Prefill", M: 2048, N: 4096, K: 4096 },
+];
+
+function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onClearMeasured }) {
   const [M, setM] = useState(4096);
   const [N, setN] = useState(4096);
   const [K, setK] = useState(4096);
@@ -563,8 +604,15 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [nvmlStatus, setNvmlStatus] = useState(null);
+  const [nvmlUnavailable, setNvmlUnavailable] = useState(false);
 
   const precOptions = ["FP16","BF16","TF32","FP8_E4M3","FP8_E5M2","NVFP4","MXFP4","INT8","INT4"];
+
+  const applyShape = (shape) => {
+    setM(shape.M);
+    setN(shape.N);
+    setK(shape.K);
+  };
 
   const analyze = async () => {
     setLoading(true);
@@ -610,8 +658,15 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints }) {
     const poll = async () => {
       try {
         const resp = await fetch(`${API_BASE}/api/nvml/status`);
-        if (resp.ok) setNvmlStatus(await resp.json());
-      } catch {}
+        if (resp.ok) {
+          setNvmlStatus(await resp.json());
+          setNvmlUnavailable(false);
+        } else {
+          setNvmlUnavailable(true);
+        }
+      } catch {
+        setNvmlUnavailable(true);
+      }
     };
     poll();
     const interval = setInterval(poll, 2000);
@@ -626,7 +681,13 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints }) {
     <div>
       {/* GEMM Input */}
       <div style={P}>
-        <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>GEMM Kernel Analyzer</div>
+        <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:.8,marginBottom:4}}>Kernel Spot Check</div>
+        <div style={{fontSize:9,color:"#64748b",marginBottom:6}}>Analyze a single kernel shape to validate theory vs measured performance.</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:6}}>
+          {QUICK_SHAPES.map((s,i)=>(
+            <button key={i} onClick={()=>applyShape(s)} style={{...btn2,opacity:0.8,padding:"4px 8px",fontSize:9}}>{s.label}</button>
+          ))}
+        </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:4,marginBottom:6}}>
           {[["M",M,setM],["N",N,setN],["K",K,setK]].map(([label,val,setter])=>(
             <div key={label}>
@@ -685,7 +746,7 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints }) {
       )}
 
       {/* NVML Status */}
-      {nvmlStatus && (
+      {nvmlStatus ? (
         <div style={{...P,marginTop:8}}>
           <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:.8,marginBottom:4}}>GPU Status (NVML)</div>
           <div style={{color:"#94a3b8",lineHeight:1.8}}>
@@ -696,6 +757,10 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints }) {
             <div>Mem: <span style={{color:"#e2e8f0"}}>{(nvmlStatus.mem_used_mb/1024).toFixed(1)}</span> / {(nvmlStatus.mem_total_mb/1024).toFixed(1)} GB</div>
             <div>GPU Util: <span style={{color:"#e2e8f0"}}>{nvmlStatus.gpu_utilization_pct}%</span></div>
           </div>
+        </div>
+      ) : nvmlUnavailable && (
+        <div style={{...P,marginTop:8,borderColor:"#334155",color:"#64748b",fontSize:9}}>
+          GPU status: NVML unavailable (no NVIDIA GPU)
         </div>
       )}
     </div>
@@ -721,6 +786,10 @@ export default function App() {
   const [fmtTab, setFmtTab] = useState("compare");
   const [selFmt, setSelFmt] = useState("NVFP4");
   const [measuredPoints, setMeasuredPoints] = useState([]);
+  const [rightTab, setRightTab] = useState("kernel");
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState([]);
+  const [highlightedSection, setHighlightedSection] = useState(null);
 
   const applyHw = useCallback(n => { setHwName(n); setHw({...HW_PRESETS[n]}); }, []);
   const model = MODELS[modelName];
@@ -761,7 +830,26 @@ export default function App() {
     }
   };
 
+  const handleChatSend = (queryOverride) => {
+    const q = (queryOverride ?? chatInput).trim();
+    if (!q) return;
+    const res = getOptimizationResponse(q);
+    setChatMessages(m => [...m, { role: "user", text: q }, { role: "assistant", text: res.message }]);
+    setChatInput("");
+    setHighlightedSection(res.highlightSection || null);
+    if (res.highlightSection === "kernel_analyzer") setRightTab("kernel");
+  };
+
+  useEffect(() => {
+    if (!highlightedSection) return;
+    const el = document.querySelector(`[data-guide-id="${highlightedSection}"]`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const t = setTimeout(() => setHighlightedSection(null), 4000);
+    return () => clearTimeout(t);
+  }, [highlightedSection]);
+
   const P = { background:"#0f172a", borderRadius:6, padding:12, marginBottom:8, border:"1px solid #1e293b" };
+  const panelHighlight = (id) => highlightedSection === id ? { border: "2px solid #8b5cf6", boxShadow: "0 0 12px rgba(139,92,246,0.4)" } : {};
   const L = { fontSize:9, color:"#475569", textTransform:"uppercase", letterSpacing:.8, marginBottom:4, display:"block" };
   const sel = { background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:3, padding:"4px 6px", fontSize:11, width:"100%", fontFamily:"monospace", outline:"none" };
   const btn = a => ({ background:a?"#3b82f6":"#1e293b", color:a?"#fff":"#94a3b8", border:"1px solid "+(a?"#3b82f6":"#334155"), borderRadius:3, padding:"3px 8px", fontSize:10, cursor:"pointer", fontFamily:"monospace" });
@@ -795,6 +883,31 @@ export default function App() {
       </div>
       {nlNote && <div style={{ fontSize:10, color:"#64748b", marginBottom:8, fontStyle:"italic", padding:"0 4px" }}>→ {nlNote}</div>}
 
+      {/* Chat: optimization guidance */}
+      <div style={{ ...P, padding:8, marginBottom:10 }} data-guide-id="chat">
+        <div style={{ fontSize:9, color:"#475569", textTransform:"uppercase", letterSpacing:.8, marginBottom:6 }}>Ask about optimizations</div>
+        <div style={{ display:"flex", gap:6, marginBottom:6 }}>
+          <input value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleChatSend()}
+            placeholder="e.g. How can I speed up decode?"
+            style={{ ...sel, flex:1, background:"transparent", border:"1px solid #334155", fontSize:11 }} />
+          <button onClick={handleChatSend} style={{ ...btn(true), flexShrink:0 }}>Send</button>
+        </div>
+        <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:6 }}>
+          {["How can I speed up decode?", "Why is it memory bound?", "What precision for long context?"].map((q,i)=>(
+            <button key={i} onClick={()=>handleChatSend(q)} style={{ ...btn(false), fontSize:9, padding:"2px 6px" }}>{q}</button>
+          ))}
+        </div>
+        {chatMessages.length > 0 && (
+          <div style={{ maxHeight:120, overflowY:"auto", fontSize:10, lineHeight:1.5 }}>
+            {chatMessages.slice(-4).map((m,i)=>(
+              <div key={i} style={{ marginBottom:4, color:m.role==="user"?"#94a3b8":"#e2e8f0" }}>
+                <span style={{ color:"#64748b", marginRight:4 }}>{m.role==="user"?"You:":"→"}</span>{m.text}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div style={{ display:"flex", gap:10 }}>
         {/* ═══ LEFT SIDEBAR ═══ */}
         <div style={{ width:250, flexShrink:0 }}>
@@ -814,10 +927,12 @@ export default function App() {
           </div>
 
           {/* Workload */}
-          <div style={P}>
+          <div style={{ ...P, ...panelHighlight("workload") }} data-guide-id="workload">
             <span style={L}>Workload</span>
             <select value={modelName} onChange={e=>setModelName(e.target.value)} style={{...sel,marginBottom:4}}>{Object.keys(MODELS).map(k=><option key={k}>{k}</option>)}</select>
-            <select value={cfgName} onChange={e=>setCfgName(e.target.value)} style={{...sel,marginBottom:4}}>{Object.keys(CONFIGS).map(k=><option key={k}>{k}</option>)}</select>
+            <div data-guide-id="precision_config" style={highlightedSection === "precision_config" ? { ...panelHighlight("precision_config"), borderRadius:4, padding:2, marginBottom:4 } : { marginBottom:4 }}>
+              <select value={cfgName} onChange={e=>{setCfgName(e.target.value); setHighlightedSection(null);}} style={{...sel,width:"100%"}}>{Object.keys(CONFIGS).map(k=><option key={k}>{k}</option>)}</select>
+            </div>
             <div style={{display:"flex",gap:3,marginBottom:6}}>
               {["prefill","decode"].map(p=><button key={p} onClick={()=>setPhase(p)} style={btn(phase===p)}>{p}</button>)}
             </div>
@@ -842,7 +957,7 @@ export default function App() {
           </div>
 
           {/* What to do — quantization recommendation */}
-          <div style={P}>
+          <div style={{ ...P, ...panelHighlight("what_to_do") }} data-guide-id="what_to_do">
             <span style={L}>What to do</span>
             <WhatToDoPanel bound={bound} aggAI={aggAI} hw={hw} hwName={hwName} cfg={cfg} peakT={peakT} />
           </div>
@@ -868,29 +983,38 @@ export default function App() {
           </div>
 
           {/* Roofline */}
-          <div style={P}>
+          <div style={{ ...P, ...panelHighlight("roofline_plot") }} data-guide-id="roofline_plot">
             <RooflinePlot ops={agg} hw={hw} pinned={pinned} showBands={showBands} measuredPoints={measuredPoints} />
           </div>
 
           {/* Op Table */}
-          <div style={P}>
+          <div style={{ ...P, ...panelHighlight("op_table") }} data-guide-id="op_table">
             <span style={L}>Operators by time</span>
             <OpTable ops={agg} hw={hw} />
           </div>
         </div>
 
-        {/* ═══ RIGHT: GEMM ANALYZER + FORMAT EXPLORER ═══ */}
-        <div style={{ width:280, flexShrink:0 }}>
-          {/* GEMM Analyzer */}
-          <div style={{ marginBottom: 8 }}>
-            <GEMMAnalyzer
-              hw={hw}
-              hwKey={hwName.includes("GB10") ? "b10" : hwName.includes("B200") ? "b200" : hwName.includes("H100") ? "h100" : "b10"}
-              onMeasuredPoints={(pts) => setMeasuredPoints(prev => [...prev, ...pts])}
-            />
+        {/* ═══ RIGHT: TABS — Kernel Spot Check | Format Reference ═══ */}
+        <div style={{ width:280, flexShrink:0 }} data-guide-id="right_sidebar">
+          <div style={{display:"flex",gap:3,marginBottom:8}}>
+            <button onClick={()=>setRightTab("kernel")} style={btn(rightTab==="kernel")}>Kernel Spot Check</button>
+            <button onClick={()=>setRightTab("format")} style={btn(rightTab==="format")}>Format Reference</button>
           </div>
+          {rightTab === "kernel" && (
+            <div data-guide-id="kernel_analyzer" style={panelHighlight("kernel_analyzer")}>
+              {measuredPoints.length > 0 && (
+                <button onClick={()=>setMeasuredPoints([])} style={{...btn(false),marginBottom:6,width:"100%",fontSize:9}}>Clear measured points</button>
+              )}
+              <GEMMAnalyzer
+                hw={hw}
+                hwKey={HW_NAME_TO_API_KEY[hwName] || "b10"}
+                onMeasuredPoints={(pts) => setMeasuredPoints(prev => [...prev, ...pts])}
+              />
+            </div>
+          )}
+          {rightTab === "format" && (
           <div style={P}>
-            <span style={L}>Format Explorer</span>
+            <span style={L}>Format Reference</span>
             <div style={{display:"flex",gap:3,marginBottom:8}}>
               <button onClick={()=>setFmtTab("compare")} style={btn(fmtTab==="compare")}>Compare</button>
               <button onClick={()=>setFmtTab("detail")} style={btn(fmtTab==="detail")}>Detail</button>
@@ -969,6 +1093,7 @@ export default function App() {
               </div>
             )}
           </div>
+          )}
         </div>
       </div>
     </div>
