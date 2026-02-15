@@ -46,7 +46,7 @@ def get_quantize_config(
     group_size: int = 128,
 ) -> Any:
     """
-    Get torchao quantization config for Jetson.
+    Get torchao quantization config.
 
     Args:
         precision: INT4 or INT8

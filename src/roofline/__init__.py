@@ -3,7 +3,6 @@
 from .calculator_shell import (
     RooflineCalculator,
     HardwareSpec,
-    JETSON_ORIN_NANO,
     bytes_per_element,
 )
 from .hardware_registry import (
@@ -22,7 +21,6 @@ from .auto_quantize import recommend_quantization, QuantizationRecommendation
 __all__ = [
     "RooflineCalculator",
     "HardwareSpec",
-    "JETSON_ORIN_NANO",
     "BLACKWELL_B10",
     "BLACKWELL_B200",
     "H100_SXM",

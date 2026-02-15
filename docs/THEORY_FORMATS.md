@@ -20,17 +20,19 @@
 | Format | Bits | Bytes/elem | Relative BW | Predicted Speedup | Accuracy | Hardware Support |
 |--------|------|------------|-------------|-------------------|----------|------------------|
 | **FP32** | 32 | 4.0 | 1.0× | Baseline | Perfect | Universal |
-| **FP16** | 16 | 2.0 | 2.0× | 2× | Minimal loss | H100/Jetson |
-| **INT8** | 8 | 1.0 | 4.0× | 4× | <1% loss | ✅ Jetson validated |
-| **INT4** | 4 | 0.5 | 8.0× | 8× | ~2-5% loss | 🔬 To validate |
+| **FP16** | 16 | 2.0 | 2.0× | 2× | Minimal loss | H100/B10 |
+| **FP8** | 8 | 1.0 | 4.0× | 4× | <1% loss | H100+, B10 native |
+| **NVFP4** | ~4.5 | ~0.57 | ~7.0× | ~7× | ~1-2% loss | B10/B200 native |
+| **INT4** | 4 | 0.5 | 8.0× | 8× | ~2-5% loss | B10 supported |
 | **INT2** | 2 | 0.25 | 16.0× | 16× | Severe | ⚠️ Research only |
 
-**Hardware Reality (Jetson):**
-- FP16: 265 μs (baseline)
-- INT8: 139 μs (1.91× speedup ✓)
-- INT4: ~70 μs (3.6× predicted - TBD)
+**Hardware Reality (Blackwell B10):**
+- FP16: ~34 μs (baseline)
+- FP8: ~17 μs (2.0× predicted)
+- NVFP4: ~9.5 μs (3.5× predicted)
+- INT4: ~8.4 μs (4.0× predicted)
 
-→ **INT8 proven safe, INT4 promising, investigating the boundary.**
+→ **Blackwell native FP8/FP4 support for optimal performance.**
 
 ---
 
@@ -118,15 +120,15 @@ This ~6% AI difference translates to ~6% throughput difference in the memory-bou
 
 ## Hardware Support Matrix
 
-| Format | Jetson Nano | A100 | H100 | B200 | B300 |
-|--------|-------------|------|------|------|------|
+| Format | A100 | H100 | B10 | B200 | B300 |
+|--------|------|------|-----|------|------|
 | FP32 | ✓ CUDA | ✓ CUDA | ✓ CUDA | ✓ CUDA | ✓ CUDA |
-| FP16 | ✓ CUDA | ✓ TC | ✓ TC | ✓ TC | ✓ TC |
-| BF16 | ✗ | ✓ TC | ✓ TC | ✓ TC | ✓ TC |
-| FP8 | ✗ | ✗ | ✓ TC | ✓ TC | ✓ TC |
-| MXFP4 | ✗ | ✗ | ✗ | ✓ TC | ✓ TC |
-| NVFP4 | ✗ | ✗ | ✗ | ✓ TC | ✓ TC |
-| INT8 | ✗ (SM<6.1) | ✓ TC | ✓ TC | ✓ TC | ✓ TC |
+| FP16 | ✓ TC | ✓ TC | ✓ TC | ✓ TC | ✓ TC |
+| BF16 | ✓ TC | ✓ TC | ✓ TC | ✓ TC | ✓ TC |
+| FP8 | ✗ | ✓ TC | ✓ TC | ✓ TC | ✓ TC |
+| MXFP4 | ✗ | ✗ | ✓ TC | ✓ TC | ✓ TC |
+| NVFP4 | ✗ | ✗ | ✓ TC | ✓ TC | ✓ TC |
+| INT8 | ✓ TC | ✓ TC | ✓ TC | ✓ TC | ✓ TC |
 
 "TC" = native tensor core support (compute at that precision's peak).
 Formats without TC support can still be used for storage (W4A16 dequant pattern) — the calculator models this correctly via the `compute_as` field.

@@ -1,4 +1,4 @@
-# Blackwell GB10 GEMM Roofline + Auto-Quantizer
+# Blackwell GB10/B10 GEMM Roofline + Auto-Quantizer
 
 TreeHacks 2026. NVIDIA track.
 
@@ -56,7 +56,7 @@ For large batch GEMM (M=4096), it's compute-bound instead. The auto-quantizer sw
 src/roofline/
   calculator_shell.py    # Roofline math. predict_gemv, predict_gemm, predict_attention, predict_ffn.
                          # bytes_per_element() handles 15+ formats including FP8, NVFP4, MXFP4, MXFP8.
-  hardware_registry.py   # GB10, B200, H100, A100, Jetson Orin presets. create_custom_asic() for arbitrary hardware.
+  hardware_registry.py   # GB10, B200, H100, A100 presets. create_custom_asic() for arbitrary hardware.
   auto_quantize.py       # Predicts all precisions, ranks by speedup, picks the best. FP8/FP4 are first-class.
   tiling_model.py        # GEMM tiling analysis: shared memory, wave quantization, SM occupancy, L2 hit rate.
 

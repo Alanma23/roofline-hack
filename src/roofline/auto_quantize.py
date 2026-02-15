@@ -16,7 +16,6 @@ from typing import Optional, List, Tuple
 from .calculator_shell import (
     RooflineCalculator,
     HardwareSpec,
-    JETSON_ORIN_NANO,
     bytes_per_element,
 )
 
@@ -64,13 +63,18 @@ def recommend_quantization(
     Returns the precision with highest predicted speedup, along with
     the method (native_fp8, AWQ, PTQ, etc.) and reason.
     """
-    # Default to Blackwell B10 if available, otherwise Jetson
+    # Default to Blackwell B10 if available
     if hardware is None:
         try:
             from .hardware_registry import BLACKWELL_B10
             hw = BLACKWELL_B10
         except ImportError:
-            hw = JETSON_ORIN_NANO
+            # Fallback to creating a basic spec
+            hw = HardwareSpec(
+                name="Default",
+                peak_bandwidth_gb_s=1000.0,
+                peak_flops_tflops={"FP16": 200.0, "FP8_E4M3": 400.0, "NVFP4": 800.0, "INT8": 400.0, "INT4": 800.0}
+            )
     else:
         hw = hardware
 
@@ -129,8 +133,8 @@ def recommend_quantization(
 
     ranked.sort(key=lambda x: x[1], reverse=True)
 
-    # Memory-constrained: force smallest format
-    if memory_limit_gb and memory_limit_gb <= 8:
+    # Memory-constrained: prefer smallest format
+    if memory_limit_gb and memory_limit_gb <= 16:
         # Find smallest precision with maximum memory savings
         ranked.sort(key=lambda x: x[2], reverse=True)
         if ranked:

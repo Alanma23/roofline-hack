@@ -1,13 +1,13 @@
 """
 Hardware specification registry.
 
-Supports Blackwell B10/B200, Jetson Orin, custom ASICs.
+Supports Blackwell B10/B200, H100, A100, and custom ASICs.
 Each HardwareSpec defines bandwidth + peak FLOPS per precision,
 which is all the roofline model needs.
 """
 
 from typing import Dict, List, Optional
-from .calculator_shell import HardwareSpec, JETSON_ORIN_NANO
+from .calculator_shell import HardwareSpec
 
 # ═══════════════════════════════════════════════
 #  BLACKWELL PRESETS
@@ -88,7 +88,6 @@ A100_SXM = HardwareSpec(
 # ═══════════════════════════════════════════════
 
 HARDWARE_REGISTRY: Dict[str, HardwareSpec] = {
-    "jetson_orin_nano": JETSON_ORIN_NANO,
     "b10": BLACKWELL_B10,
     "b200": BLACKWELL_B200,
     "h100": H100_SXM,

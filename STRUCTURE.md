@@ -18,18 +18,13 @@ roofline-hack/
 │   └── calculator_shell.py           🔢 YOUR CODE: Roofline formulas
 │
 ├── benchmarks/
-│   ├── kernel_shell.py               ⚡ YOUR CODE: Benchmark kernels
-│   └── jetson/
-│       ├── validate_jetson.py        ✅ Reference implementation
-│       ├── setup_jetson.sh           🔧 Jetson setup
-│       └── README.md
+│   └── kernel_shell.py               ⚡ YOUR CODE: Benchmark kernels
 │
 ├── compare_shell.py                  🎯 YOUR CODE: Validate predictions
 │
-├── docs/                             📖 Theory (3 files)
+├── docs/                             📖 Theory (2 files)
 │   ├── THEORY_FORMATS.md             → Precision formats
-│   ├── THEORY_MATH.md                → Operator math
-│   └── JETSON_VALIDATION.md          → Validation guide
+│   └── THEORY_MATH.md                → Operator math
 │
 └── frontend/
     └── roofline-calc-v2.jsx          🎨 Interactive visualizer (reference)
@@ -69,7 +64,7 @@ roofline-hack/
 
 **Time:** 30-45 min
 
-**Reference:** `benchmarks/jetson/validate_jetson.py` (working example)
+**Reference:** Benchmark kernels using PyTorch CUDA operations
 
 ---
 
@@ -83,7 +78,7 @@ roofline-hack/
 
 **Time:** 15-30 min
 
-**Goal:** Prove roofline model is accurate (<15% error)
+**Goal:** Prove roofline model is accurate on Blackwell B10
 
 ---
 
@@ -109,8 +104,9 @@ Error: 4.1% → Model is accurate! ✓
 
 **Question:** How far can we push quantization?
 
-- **FP16 → INT8:** 2× speedup (proven on Jetson)
-- **FP16 → INT4:** 4× speedup (predicted, needs custom kernel)
+- **FP16 → FP8:** 2× speedup (Blackwell native)
+- **FP16 → NVFP4:** ~3.5× speedup (Blackwell native)
+- **FP16 → INT4:** 4× speedup (predicted)
 - **Tradeoff:** Speed vs accuracy
 
 **This is ML systems co-design!**
@@ -125,7 +121,6 @@ Error: 4.1% → Model is accurate! ✓
 | `NEXT_STEPS.md` | Theory reference (roofline model, derivations) |
 | `docs/THEORY_FORMATS.md` | Precision catalog (15+ formats) |
 | `docs/THEORY_MATH.md` | Operator math (GEMV, GEMM, attention) |
-| `docs/JETSON_VALIDATION.md` | Jetson-specific guide |
 | `frontend/roofline-calc-v2.jsx` | Full reference implementation |
 
 ---
@@ -141,11 +136,6 @@ python benchmarks/kernel_shell.py
 
 # Validate (compare predictions vs measurements)
 python compare_shell.py
-
-# Jetson setup
-cd benchmarks/jetson
-bash setup_jetson.sh
-python validate_jetson.py
 ```
 
 ---

@@ -1,6 +1,6 @@
 # Roofline Analysis - Implementation Guide
 
-**Goal:** Build roofline calculator + benchmark kernels, validate predictions on Jetson Orin Nano
+**Goal:** Build roofline calculator + benchmark kernels, validate predictions on Blackwell GB10/B10
 
 ---
 
@@ -92,7 +92,7 @@ NF4:    4 bits + (16-bit scale / 64) = 4.25 bits
 File: `src/roofline/calculator_shell.py`
 
 **TODO for you:**
-- Define hardware specs (Jetson: 60 GB/s, 2.7 TFLOPS FP16)
+- Define hardware specs (B10: 1000 GB/s, 200 TFLOPS FP16)
 - Implement `predict_gemv()` using formulas above
 - Calculate: FLOPs, Bytes, AI, time_memory, time_compute
 - Determine bottleneck (which time is larger?)
@@ -119,36 +119,37 @@ File: `compare_shell.py`
 
 ---
 
-## 📊 Expected Results (Jetson Orin Nano)
+## 📊 Expected Results (Blackwell B10)
 
 | Operator | Precision | Predicted | Measured | Error |
 |----------|-----------|-----------|----------|-------|
-| GEMV 4K  | FP16      | ~280 μs   | ~265 μs  | ~5%   |
-| GEMV 4K  | INT8      | ~145 μs   | ~139 μs  | ~4%   |
+| GEMV 4K  | FP16      | ~34 μs    | TBD      | TBD   |
+| GEMV 4K  | FP8       | ~17 μs    | TBD      | TBD   |
+| GEMV 4K  | NVFP4     | ~9.5 μs   | TBD      | TBD   |
 
-**Speedup:** INT8 should be ~1.9-2.0× faster than FP16 (validated!)
+**Speedup:** FP8 should be ~2.0× faster than FP16, NVFP4 ~3.5× faster
 
 ---
 
 ## 🔍 Understanding Your Results
 
 **Why memory-bound?**
-- GEMV AI = 1.0 (FP16) or 2.0 (INT8)
-- Critical AI = 45 (Jetson FP16)
+- GEMV AI = 1.0 (FP16) or 2.0 (FP8)
+- Critical AI = 200 (B10 FP16)
 - AI << Critical AI → bandwidth limits performance
 
 **Why does quantization help?**
 - Less data to move → less time waiting on memory
-- FP16→INT8: 2× less data → 2× faster
-- FP16→INT4: 4× less data → 4× faster (predicted)
+- FP16→FP8: 2× less data → 2× faster
+- FP16→NVFP4: ~3.5× less data → ~3.5× faster
+- FP16→INT4: 4× less data → 4× faster
 
 ---
 
 ## 📚 Reference
 
 - **Theory formulas:** `docs/THEORY_MATH.md`
-- **Precision catalog:** `docs/THEORY_FORMATS.md`  
-- **Jetson validation:** `docs/JETSON_VALIDATION.md`
+- **Precision catalog:** `docs/THEORY_FORMATS.md`
 - **Frontend reference:** `frontend/roofline-calc-v2.jsx` (lines 148-208)
 
 ---

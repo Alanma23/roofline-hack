@@ -35,16 +35,9 @@ def run_pipeline(
 
     result = {"recommendation": None, "quantized": False, "tokens_per_sec": None, "error": None}
 
-    # 1. Roofline recommendation (use Jetson when memory-constrained)
-    hw = None
-    if memory_limit_gb is not None and memory_limit_gb <= 8:
-        try:
-            from src.roofline.hardware_registry import JETSON_ORIN_NANO
-            hw = JETSON_ORIN_NANO
-        except ImportError:
-            pass
+    # 1. Roofline recommendation
     rec = recommend_quantization(
-        hardware=hw,
+        hardware=None,  # Will default to B10
         memory_limit_gb=memory_limit_gb,
         phase=phase,
     )

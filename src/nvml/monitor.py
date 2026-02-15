@@ -1,7 +1,6 @@
 """
 NVML-based GPU monitoring.
 
-Replaces Jetson sysfs approach (benchmarks/jetson/lowlevel.py).
 Works on any NVIDIA GPU via pynvml — Blackwell, Hopper, Ampere, etc.
 """
 

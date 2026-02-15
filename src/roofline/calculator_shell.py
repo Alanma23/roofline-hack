@@ -4,6 +4,13 @@ Roofline Calculator Shell - Implement the formulas yourself!
 Reference: frontend/roofline-calc-v2.jsx lines 148-208 for operator math
 """
 
+"""
+Roofline Calculator - Predict performance from hardware specs and precision formats.
+
+Supports Blackwell GB10/B10, B200, H100, A100 and custom ASICs.
+Handles FP16, FP8, NVFP4, MXFP4, INT8, INT4 and other formats.
+"""
+
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -95,19 +102,6 @@ class HardwareSpec:
         if peak_tflops <= 0:
             peak_tflops = self.peak_flops_tflops.get("FP16", 1.0)
         return (peak_tflops * 1e12) / (self.peak_bandwidth_gb_s * 1e9)
-
-# Hardware specs from JETSON_VALIDATION.md (measured, not theoretical)
-JETSON_ORIN_NANO = HardwareSpec(
-    name="Jetson Orin Nano",
-    peak_bandwidth_gb_s=60.0,
-    peak_flops_tflops={
-        "FP16": 2.7,
-        "INT8": 5.5,
-        "INT4": 0.0,  # W4A16 dequant - use FP16 peak
-    },
-)
-
-
 
 # ═══════════════════════════════════════════════
 #  ROOFLINE CALCULATOR
