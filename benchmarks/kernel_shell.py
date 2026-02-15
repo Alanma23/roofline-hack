@@ -5,9 +5,18 @@ Supports FP8 (torch._scaled_mm), INT8 (torch._int_mm), TF32,
 and all standard precisions. Integrates NVML power tracking.
 """
 
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import torch
 from typing import Dict, Optional
 from dataclasses import dataclass
+
+from src.roofline.calculator_shell import bytes_per_element
 
 
 # ═══════════════════════════════════════════════
@@ -43,20 +52,6 @@ def get_torch_dtype(precision: str) -> torch.dtype:
     raise ValueError(f"Unknown precision: {precision!r}")
 
 
-def bytes_per_element(precision: str) -> float:
-    """Bytes per element for bandwidth calculation."""
-    p = precision.strip().upper()
-    if p == "FP64":
-        return 8.0
-    if p in ("FP32", "TF32"):
-        return 4.0
-    if p in ("FP16", "BF16"):
-        return 2.0
-    if p in ("FP8", "FP8_E4M3", "FP8_E5M2", "INT8"):
-        return 1.0
-    if p in ("INT4", "NVFP4", "MXFP4"):
-        return 0.5
-    return 2.0  # default
 
 
 # ═══════════════════════════════════════════════
@@ -114,11 +109,12 @@ class GEMVKernel:
             return torch.matmul(self.W.to(torch.float16), self.x.to(torch.float16))
         return torch.matmul(self.W, self.x)
 
-    def benchmark(self, num_iters: int = 100, warmup: int = 10,
+    def benchmark(self, num_iters: int = 100, warmup: int = 25,
                   power_tracker=None) -> Dict:
         """Measure kernel performance with CUDA events + optional NVML tracking."""
-        for _ in range(warmup):
-            self.run()
+        with torch.inference_mode():
+            for _ in range(warmup):
+                self.run()
         torch.cuda.synchronize()
 
         if power_tracker:
@@ -126,10 +122,11 @@ class GEMVKernel:
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(num_iters):
-            self.run()
-        end.record()
+        with torch.inference_mode():
+            start.record()
+            for _ in range(num_iters):
+                self.run()
+            end.record()
         torch.cuda.synchronize()
 
         nvml_summary = {}
@@ -186,12 +183,12 @@ class GEMMKernel:
         self.dtype = get_torch_dtype(precision)
 
         if self.precision in {"FP64", "FP32", "TF32", "FP16", "BF16"}:
-            self.A = torch.randn(M, K, dtype=self.dtype, device=device)
-            self.B = torch.randn(K, N, dtype=self.dtype, device=device)
+            self.A = torch.randn(M, K, dtype=self.dtype, device=device).contiguous()
+            self.B = torch.randn(K, N, dtype=self.dtype, device=device).contiguous()
         elif self.precision in {"FP8_E4M3", "FP8_E5M2", "FP8"}:
             # FP8: create in FP16 then cast
-            self.A = torch.randn(M, K, dtype=torch.float16, device=device).to(self.dtype)
-            self.B = torch.randn(K, N, dtype=torch.float16, device=device).to(self.dtype)
+            self.A = torch.randn(M, K, dtype=torch.float16, device=device).to(self.dtype).contiguous()
+            self.B = torch.randn(K, N, dtype=torch.float16, device=device).to(self.dtype).contiguous()
             self.scale_a = torch.tensor(1.0, device=device)
             self.scale_b = torch.tensor(1.0, device=device)
         elif self.precision == "INT8":
@@ -226,11 +223,12 @@ class GEMMKernel:
             return torch.matmul(self.A.to(torch.float16), self.B.to(torch.float16))
         return torch.matmul(self.A, self.B)
 
-    def benchmark(self, num_iters: int = 50, warmup: int = 10,
+    def benchmark(self, num_iters: int = 100, warmup: int = 25,
                   power_tracker=None) -> Dict:
         """Benchmark with CUDA events + optional NVML power tracking."""
-        for _ in range(warmup):
-            self.run()
+        with torch.inference_mode():
+            for _ in range(warmup):
+                self.run()
         torch.cuda.synchronize()
 
         if power_tracker:
@@ -238,10 +236,11 @@ class GEMMKernel:
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(num_iters):
-            self.run()
-        end.record()
+        with torch.inference_mode():
+            start.record()
+            for _ in range(num_iters):
+                self.run()
+            end.record()
         torch.cuda.synchronize()
 
         nvml_summary = {}
@@ -294,7 +293,7 @@ def get_gpu_info() -> Dict:
         "available": True,
         "name": props.name,
         "compute_capability": f"{props.major}.{props.minor}",
-        "total_memory_gb": round(props.total_mem / (1024 ** 3), 1),
+        "total_memory_gb": round(getattr(props, "total_memory", getattr(props, "total_mem", 0)) / (1024 ** 3), 1),
         "sm_count": props.multi_processor_count,
         "is_blackwell": props.major >= 10,
         "is_hopper": props.major == 9,
@@ -303,15 +302,87 @@ def get_gpu_info() -> Dict:
 
 
 # ═══════════════════════════════════════════════
+#  SATURATION SWEEP — push GB10 to max
+# ═══════════════════════════════════════════════
+
+# Larger shapes for better utilization (multiples of 128 for tiling)
+SATURATION_GEMM_SHAPES = [
+    (4096, 4096, 4096),   # baseline
+    (8192, 4096, 4096),   # 2×M
+    (8192, 8192, 4096),   # larger
+    (8192, 8192, 8192),   # 8K cube
+    (16384, 4096, 4096),  # prefill-style
+    (16384, 8192, 4096),  # large prefill
+]
+
+# Larger GEMV for memory saturation (working set > L2)
+SATURATION_GEMV_SHAPES = [
+    (4096, 4096),
+    (8192, 8192),
+    (16384, 4096),
+    (4096, 14336),   # FFN up-proj
+]
+
+
+def run_saturation_sweep(
+    precisions: Optional[list] = None,
+    warmup: int = 50,
+    num_iters: int = 100,
+    has_fp8: bool = True,
+) -> dict:
+    """
+    Sweep shapes to find peak TFLOPS and GB/s. Uses larger matrices for better utilization.
+    """
+    precs = precisions or ["FP16", "FP8_E4M3", "TF32"]
+    if "FP8_E4M3" in precs and not has_fp8:
+        precs = [p for p in precs if p != "FP8_E4M3"]
+    results = {"gemm": [], "gemv": []}
+
+    for M, N, K in SATURATION_GEMM_SHAPES:
+        est_gb = (M * K + K * N + M * N) * 2 * 3 / 1e9
+        if est_gb > 80:
+            continue
+        for prec in precs:
+            try:
+                k = GEMMKernel(M, N, K, prec)
+                r = k.benchmark(num_iters=num_iters, warmup=warmup)
+                r["shape"] = f"{M}x{N}x{K}"
+                results["gemm"].append(r)
+            except Exception as e:
+                results["gemm"].append({"shape": f"{M}x{N}x{K}", "precision": prec, "error": str(e)})
+
+    for N, K in SATURATION_GEMV_SHAPES:
+        for prec in precs:
+            try:
+                k = GEMVKernel(N, K, prec)
+                r = k.benchmark(num_iters=num_iters, warmup=warmup)
+                r["shape"] = f"{N}x{K}"
+                results["gemv"].append(r)
+            except Exception as e:
+                results["gemv"].append({"shape": f"{N}x{K}", "precision": prec, "error": str(e)})
+
+    return results
+
+
+# ═══════════════════════════════════════════════
 #  CLI
 # ═══════════════════════════════════════════════
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="GEMM/GEMV benchmark")
+    parser.add_argument("--saturate", action="store_true", help="Saturation sweep: larger shapes to max out GPU")
+    args = parser.parse_args()
+
     if not check_cuda():
         print("ERROR: CUDA not available!")
         exit(1)
 
     info = get_gpu_info()
+    # Optimize for max throughput
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
     print("=" * 60)
     print(f"GPU: {info['name']} (SM {info['compute_capability']})")
     print(f"Memory: {info['total_memory_gb']} GB | SMs: {info['sm_count']}")
@@ -363,3 +434,41 @@ if __name__ == "__main__":
         for prec, r in gemm_results.items():
             if prec != "FP16":
                 print(f"  {prec:12s}: {t_base / r['measured_time_us']:.2f}x")
+
+    # Interpretation (GB10 peak: 287 GB/s, FP16 62T, FP8 124T)
+    print("\n" + "=" * 60)
+    print("Interpretation (GB10: 287 GB/s BW, FP16 62T, FP8 124T)")
+    print("-" * 60)
+    print("GEMV: memory-bound (AI~1-2). FP8 > FP16 due to half the bytes.")
+    print("GEMM: compute-bound (AI>>200). FP8 exceeds spec (124T) when")
+    print("  tensor cores are well utilized. FP16 often underutilizes.")
+
+    # Saturation sweep: larger shapes to push GPU to max
+    if args.saturate:
+        print("\n" + "=" * 60)
+        print("SATURATION SWEEP — larger shapes, max throughput")
+        print("=" * 60)
+        sweep = run_saturation_sweep(
+            precisions=["FP16", "FP8_E4M3", "TF32"],
+            warmup=50,
+            num_iters=100,
+            has_fp8=info.get("has_fp8", True),
+        )
+        # Best GEMM per precision
+        gemm_ok = [r for r in sweep["gemm"] if "measured_tflops" in r]
+        if gemm_ok:
+            best = max(gemm_ok, key=lambda r: r["measured_tflops"])
+            print(f"\nBest GEMM: {best['shape']} {best['precision']} — "
+                  f"{best['measured_tflops']:.1f} TFLOPS, {best['measured_bandwidth_gb_s']:.1f} GB/s")
+            for prec in ["FP16", "FP8_E4M3", "TF32"]:
+                pbest = [r for r in gemm_ok if r["precision"] == prec]
+                if pbest:
+                    b = max(pbest, key=lambda r: r["measured_tflops"])
+                    util = (b["measured_tflops"] / 124 * 100) if prec == "FP8_E4M3" else (b["measured_tflops"] / 62 * 100)
+                    print(f"  {prec:12s} best: {b['shape']:20s} {b['measured_tflops']:6.1f} T ({util:.0f}% of peak)")
+        # Best GEMV (memory saturation)
+        gemv_ok = [r for r in sweep["gemv"] if "measured_bandwidth_gb_s" in r]
+        if gemv_ok:
+            gemv_best = max(gemv_ok, key=lambda r: r["measured_bandwidth_gb_s"])
+            print(f"\nBest GEMV BW: {gemv_best['shape']} {gemv_best['precision']} — "
+                  f"{gemv_best['measured_bandwidth_gb_s']:.1f} GB/s ({gemv_best['measured_bandwidth_gb_s']/287*100:.0f}% of 287 GB/s)")

@@ -723,13 +723,14 @@ function BenchmarkPanel({ hwKey, onMeasuredPoints }) {
     setPrecs(prev => prev.includes(p) ? prev.filter(x=>x!==p) : [...prev, p]);
   };
 
-  const runBenchmarks = async () => {
+  const runBenchmarks = async (saturateMode = false) => {
     setRunning(true);
     setError(null);
     setResults([]);
     const shapesStr = shapes.length ? shapes.join(";") : "1,4096,4096;2048,4096,4096;4096,4096,4096";
     const precStr = precs.length ? precs.join(",") : "FP16,FP8_E4M3,NVFP4,INT8";
-    const url = `${API_BASE}/api/benchmark/stream?hardware_key=${hwKey}&shapes=${encodeURIComponent(shapesStr)}&precisions=${encodeURIComponent(precStr)}`;
+    let url = `${API_BASE}/api/benchmark/stream?hardware_key=${hwKey}&shapes=${encodeURIComponent(shapesStr)}&precisions=${encodeURIComponent(precStr)}`;
+    if (saturateMode) url = `${API_BASE}/api/benchmark/stream?hardware_key=${hwKey}&saturate=true`;
     const collected = [];
 
     try {
@@ -805,12 +806,17 @@ function BenchmarkPanel({ hwKey, onMeasuredPoints }) {
         ))}
       </div>
 
-      <div style={{display:"flex",gap:6,marginBottom:6}}>
-        <button onClick={runBenchmarks} disabled={running || shapes.length===0 || precs.length===0}
-          style={{...btn2,opacity:(running||!shapes.length||!precs.length)?0.6:1,flex:1}}>
-          {running ? "Running…" : "Run live benchmarks"}
+      <div style={{display:"flex",gap:6,marginBottom:6,flexWrap:"wrap"}}>
+        <button onClick={()=>runBenchmarks(false)} disabled={running || shapes.length===0 || precs.length===0}
+          style={{...btn2,opacity:(running||!shapes.length||!precs.length)?0.6:1,flex:1,minWidth:100}}>
+          {running ? "Running…" : "Run benchmarks"}
+        </button>
+        <button onClick={()=>runBenchmarks(true)} disabled={running}
+          style={{...btn2,background:"#f59e0b",opacity:running?0.6:1,flex:1,minWidth:100}}>
+          {running ? "Running…" : "Saturation sweep"}
         </button>
       </div>
+      <div style={{fontSize:8,color:"#64748b",marginTop:-2,marginBottom:4}}>Saturation: larger shapes (8K³, 16K×8K) to max out GPU</div>
       {progress && <div style={{fontSize:9,color:"#94a3b8",marginBottom:4}}>{progress}</div>}
       {error && <div style={{fontSize:9,color:"#f87171",marginBottom:4}}>{error}</div>}
 

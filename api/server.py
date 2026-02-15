@@ -316,12 +316,21 @@ def nvml_status():
 BENCHMARK_SHAPES_DEFAULT = "1,4096,4096;2048,4096,4096;4096,4096,4096"
 BENCHMARK_PRECISIONS_DEFAULT = "FP16,FP8_E4M3,NVFP4,INT8"
 
+# Saturation sweep shapes (GEMM + GEMV) — push GPU to max
+SATURATION_SHAPES = [
+    (4096, 4096, 4096), (8192, 4096, 4096), (8192, 8192, 4096),
+    (8192, 8192, 8192), (16384, 4096, 4096), (16384, 8192, 4096),
+    (1, 4096, 4096), (1, 8192, 8192), (1, 16384, 4096), (1, 4096, 14336),
+]
+SATURATION_PRECISIONS = ["FP16", "FP8_E4M3", "TF32"]
+
 
 @app.get("/api/benchmark/stream")
 async def benchmark_stream(
     hardware_key: str = "b10",
     shapes: str = BENCHMARK_SHAPES_DEFAULT,
     precisions: str = BENCHMARK_PRECISIONS_DEFAULT,
+    saturate: bool = False,
 ):
     """
     SSE stream: run benchmarks across shapes × precisions, yield each result as it completes.
@@ -333,16 +342,22 @@ async def benchmark_stream(
     except KeyError:
         raise HTTPException(404, f"Hardware '{hardware_key}' not found")
 
-    shape_tuples = []
-    for part in shapes.split(";"):
-        nums = [int(x.strip()) for x in part.split(",") if x.strip()]
-        if len(nums) == 3:
-            shape_tuples.append(tuple(nums))
-    prec_list = [p.strip() for p in precisions.split(",") if p.strip()]
-    if not shape_tuples:
-        shape_tuples = [(1, 4096, 4096), (2048, 4096, 4096), (4096, 4096, 4096)]
-    if not prec_list:
-        prec_list = ["FP16", "FP8_E4M3", "NVFP4", "INT8"]
+    if saturate:
+        shape_tuples = [s for s in SATURATION_SHAPES]
+        prec_list = list(SATURATION_PRECISIONS)
+        num_iters, warmup = 100, 50
+    else:
+        shape_tuples = []
+        for part in shapes.split(";"):
+            nums = [int(x.strip()) for x in part.split(",") if x.strip()]
+            if len(nums) == 3:
+                shape_tuples.append(tuple(nums))
+        prec_list = [p.strip() for p in precisions.split(",") if p.strip()]
+        if not shape_tuples:
+            shape_tuples = [(1, 4096, 4096), (2048, 4096, 4096), (4096, 4096, 4096)]
+        if not prec_list:
+            prec_list = ["FP16", "FP8_E4M3", "NVFP4", "INT8"]
+        num_iters, warmup = 50, 25
 
     async def generate():
         try:
@@ -365,7 +380,7 @@ async def benchmark_stream(
                             k = GEMVKernel(N, K, prec)
                         else:
                             k = GEMMKernel(M, N, K, prec)
-                        return k.benchmark(num_iters=50)
+                        return k.benchmark(num_iters=num_iters, warmup=warmup)
 
                     meas = await asyncio.to_thread(run_one)
                     done += 1

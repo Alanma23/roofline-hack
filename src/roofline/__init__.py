@@ -1,5 +1,14 @@
 """Roofline calculator, hardware registry, and auto-quantization."""
 
+from .roofline_math import (
+    gemv_flops,
+    gemv_bytes,
+    gemm_flops,
+    gemm_bytes,
+    arithmetic_intensity,
+    critical_ai,
+    roofline_time,
+)
 from .calculator_shell import (
     RooflineCalculator,
     HardwareSpec,
@@ -19,6 +28,13 @@ from .hardware_registry import (
 from .auto_quantize import recommend_quantization, QuantizationRecommendation
 
 __all__ = [
+    "gemv_flops",
+    "gemv_bytes",
+    "gemm_flops",
+    "gemm_bytes",
+    "arithmetic_intensity",
+    "critical_ai",
+    "roofline_time",
     "RooflineCalculator",
     "HardwareSpec",
     "BLACKWELL_B10",

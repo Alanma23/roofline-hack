@@ -1,18 +1,23 @@
 """
-Roofline Calculator Shell - Implement the formulas yourself!
-
-Reference: frontend/roofline-calc-v2.jsx lines 148-208 for operator math
-"""
-
-"""
 Roofline Calculator - Predict performance from hardware specs and precision formats.
 
 Supports Blackwell GB10/B10, B200, H100, A100 and custom ASICs.
 Handles FP16, FP8, NVFP4, MXFP4, INT8, INT4 and other formats.
+
+Arithmetic intensity (AI) and roofline math: see roofline_math.py
 """
 
 from dataclasses import dataclass
 from typing import Dict, Optional
+
+from .roofline_math import (
+    gemv_flops,
+    gemv_bytes,
+    gemm_flops,
+    gemm_bytes,
+    arithmetic_intensity,
+    roofline_time,
+)
 
 
 # ═══════════════════════════════════════════════
@@ -115,79 +120,21 @@ class RooflineCalculator:
     
     def predict_gemv(self, N: int, K: int, precision: str) -> Dict:
         """
-        TODO: Predict GEMV performance: y[N] = W[N,K] @ x[K]
-        
-        Reference: frontend/roofline-calc-v2.jsx lines 157-161
-        
-        Step 1: Calculate FLOPs
-        -----------------------
-        GEMV is fused multiply-add: for each of N outputs, do K MAC operations
-        Formula: FLOPs = 2 * N * K
-        
-        Step 2: Calculate Bytes
-        -----------------------
-        Memory traffic:
-        - Read input: x[K] 
-        - Read weights: W[N, K]
-        - Write output: y[N]
-        
-        Formula: 
-        Bytes = K * bytes_per_elem(precision)       // input
-              + N * K * bytes_per_elem(precision)   // weights
-              + N * bytes_per_elem(precision)       // output (may be different precision)
-        
-        Step 3: Calculate Arithmetic Intensity
-        ---------------------------------------
-        Formula: AI = FLOPs / Bytes (FLOP/byte)
-        
-        Step 4: Roofline Prediction
-        ---------------------------
-        Time is limited by either memory or compute, whichever is SLOWER:
-        
-        time_memory = Bytes / (bandwidth in bytes/sec)
-        time_compute = FLOPs / (peak_flops in FLOPS/sec)
-        predicted_time = max(time_memory, time_compute)
-        
-        If time_memory > time_compute: memory-bound
-        If time_compute > time_memory: compute-bound
-        
-        Units conversion:
-        - bandwidth: GB/s → bytes/s (× 10^9)
-        - peak_flops: TFLOPS → FLOPS/s (× 10^12)
-        - time: seconds → microseconds (× 10^6)
-        
-        Returns
-        -------
-        Dict with keys:
-            predicted_time_us: float
-            predicted_tflops: float
-            ai: float
-            critical_ai: float
-            bottleneck: str ('memory' or 'compute')
-            flops: int
-            bytes: int
+        Predict GEMV performance: y[N] = W[N,K] @ x[K]
+        AI = FLOPs / Bytes, output typically FP16 (2 bytes).
         """
-        flop_count = 2 * N * K
         bpe = bytes_per_element(precision)
-        bytes_used = K * bpe + N * K * bpe + N * bpe
+        flop_count = gemv_flops(N, K)
+        bytes_used = gemv_bytes(N, K, bpe, bpe_output=2.0)
 
-        ai = flop_count / bytes_used
-        peak_tflops = self.hardware.peak_flops_tflops.get(
-            precision, self.hardware.peak_flops_tflops.get("FP16", 1.0)
+        peak_tflops = self._peak_tflops(precision)
+        pred_time_s, predicted_tflops, critical_ai, bottleneck = roofline_time(
+            flop_count, bytes_used, peak_tflops, self.hardware.peak_bandwidth_gb_s
         )
-        if peak_tflops <= 0:
-            peak_tflops = self.hardware.peak_flops_tflops.get("FP16", 1.0)
-
-        t_math = flop_count / (peak_tflops * 1e12)
-        t_comm = bytes_used / (self.hardware.peak_bandwidth_gb_s * 1e9)
-        pred_time_s = max(t_math, t_comm)
-        predicted_time_us = pred_time_s * 1e6
-        predicted_tflops = (flop_count / pred_time_s) / 1e12 if pred_time_s > 0 else 0
-        critical_ai = self.hardware.critical_ai(precision)
-        bottleneck = "memory" if t_comm >= t_math else "compute"
+        ai = arithmetic_intensity(flop_count, bytes_used)
 
         return {
-            "predicted_time_us": predicted_time_us,
+            "predicted_time_us": pred_time_s * 1e6,
             "predicted_tflops": predicted_tflops,
             "ai": ai,
             "critical_ai": critical_ai,
@@ -196,32 +143,32 @@ class RooflineCalculator:
             "bytes": int(bytes_used),
         }
 
+    def _peak_tflops(self, precision: str) -> float:
+        """Get peak TFLOPS for precision, with fallback to FP16."""
+        peak = self.hardware.peak_flops_tflops.get(
+            precision, self.hardware.peak_flops_tflops.get("FP16", 1.0)
+        )
+        if peak <= 0:
+            peak = self.hardware.peak_flops_tflops.get("FP16", 1.0)
+        return peak
+
     def predict_gemm(self, M: int, N: int, K: int, precision: str) -> Dict:
         """
         Predict GEMM performance: C[M,N] = A[M,K] @ B[K,N]
-        FLOPs = 2*M*N*K, Bytes = M*K + K*N + M*N (in bytes_per_elem units)
+        Output C is typically FP16 (2 bytes) from accumulation.
         """
-        flop_count = 2 * M * N * K
         bpe = bytes_per_element(precision)
-        bytes_used = M * K * bpe + K * N * bpe + M * N * bpe
+        flop_count = gemm_flops(M, N, K)
+        bytes_used = gemm_bytes(M, N, K, bpe, bpe_output=2.0)
 
-        ai = flop_count / bytes_used
-        peak_tflops = self.hardware.peak_flops_tflops.get(
-            precision, self.hardware.peak_flops_tflops.get("FP16", 1.0)
+        peak_tflops = self._peak_tflops(precision)
+        pred_time_s, predicted_tflops, critical_ai, bottleneck = roofline_time(
+            flop_count, bytes_used, peak_tflops, self.hardware.peak_bandwidth_gb_s
         )
-        if peak_tflops <= 0:
-            peak_tflops = self.hardware.peak_flops_tflops.get("FP16", 1.0)
-
-        t_math = flop_count / (peak_tflops * 1e12)
-        t_comm = bytes_used / (self.hardware.peak_bandwidth_gb_s * 1e9)
-        pred_time_s = max(t_math, t_comm)
-        predicted_time_us = pred_time_s * 1e6
-        predicted_tflops = (flop_count / pred_time_s) / 1e12 if pred_time_s > 0 else 0
-        critical_ai = self.hardware.critical_ai(precision)
-        bottleneck = "memory" if t_comm >= t_math else "compute"
+        ai = arithmetic_intensity(flop_count, bytes_used)
 
         return {
-            "predicted_time_us": predicted_time_us,
+            "predicted_time_us": pred_time_s * 1e6,
             "predicted_tflops": predicted_tflops,
             "ai": ai,
             "critical_ai": critical_ai,
@@ -239,32 +186,22 @@ class RooflineCalculator:
         precision: str,
     ) -> Dict:
         """
-        Predict attention performance: softmax(Q @ K^T) @ V
-        Two matmuls: QK^T and (QK^T) @ V. From THEORY_MATH.md.
+        Predict attention: softmax(Q @ K^T) @ V.
+        FLOPs: 2 matmuls (QK^T + Score@V). Bytes: Q,K,V,O tensors (simplified).
         """
-        qk_flops = 2 * batch * num_heads * seq_len * seq_len * head_dim
-        qkv_flops = 2 * batch * num_heads * seq_len * seq_len * head_dim
-        flop_count = qk_flops + qkv_flops
+        flop_count = 4 * batch * num_heads * seq_len * seq_len * head_dim
         bpe = bytes_per_element(precision)
+        # Q, K, V, O each: batch * num_heads * seq * head_dim elements
         bytes_used = 4 * batch * num_heads * seq_len * head_dim * bpe
 
-        ai = flop_count / bytes_used if bytes_used > 0 else 0
-        peak_tflops = self.hardware.peak_flops_tflops.get(
-            precision, self.hardware.peak_flops_tflops.get("FP16", 1.0)
+        ai = arithmetic_intensity(flop_count, bytes_used)
+        peak_tflops = self._peak_tflops(precision)
+        pred_time_s, predicted_tflops, critical_ai, bottleneck = roofline_time(
+            flop_count, bytes_used, peak_tflops, self.hardware.peak_bandwidth_gb_s
         )
-        if peak_tflops <= 0:
-            peak_tflops = self.hardware.peak_flops_tflops.get("FP16", 1.0)
-
-        t_math = flop_count / (peak_tflops * 1e12)
-        t_comm = bytes_used / (self.hardware.peak_bandwidth_gb_s * 1e9)
-        pred_time_s = max(t_math, t_comm)
-        predicted_time_us = pred_time_s * 1e6
-        predicted_tflops = (flop_count / pred_time_s) / 1e12 if pred_time_s > 0 else 0
-        critical_ai = self.hardware.critical_ai(precision)
-        bottleneck = "memory" if t_comm >= t_math else "compute"
 
         return {
-            "predicted_time_us": predicted_time_us,
+            "predicted_time_us": pred_time_s * 1e6,
             "predicted_tflops": predicted_tflops,
             "ai": ai,
             "critical_ai": critical_ai,
@@ -283,34 +220,25 @@ class RooflineCalculator:
         gate: bool = True,
     ) -> Dict:
         """
-        Predict FFN (SwiGLU) performance. From THEORY_MATH.md.
-        gate=True: 3 projections (gate, up, down); gate=False: 2 (up, down).
+        Predict FFN (SwiGLU): gate, up, down projections.
+        gate=True: 6*B*T*H*dff FLOPs; gate=False: 4*B*T*H*dff.
+        Bytes: weights (3*H*dff) + activations.
         """
         T = seq_len if seq_len > 0 else 1
-        if gate:
-            flop_count = 6 * batch * T * hidden * ffn_dim
-        else:
-            flop_count = 4 * batch * T * hidden * ffn_dim
+        flop_count = 6 * batch * T * hidden * ffn_dim if gate else 4 * batch * T * hidden * ffn_dim
         bpe = bytes_per_element(precision)
+        # Weights: gate(H,dff) + up(H,dff) + down(dff,H) = 3*H*dff
+        # Activations: input, gate/up outputs, down output
         bytes_used = (3 * hidden * ffn_dim + 2 * batch * T * ffn_dim + batch * T * hidden) * bpe
 
-        ai = flop_count / bytes_used if bytes_used > 0 else 0
-        peak_tflops = self.hardware.peak_flops_tflops.get(
-            precision, self.hardware.peak_flops_tflops.get("FP16", 1.0)
+        ai = arithmetic_intensity(flop_count, bytes_used)
+        peak_tflops = self._peak_tflops(precision)
+        pred_time_s, predicted_tflops, critical_ai, bottleneck = roofline_time(
+            flop_count, bytes_used, peak_tflops, self.hardware.peak_bandwidth_gb_s
         )
-        if peak_tflops <= 0:
-            peak_tflops = self.hardware.peak_flops_tflops.get("FP16", 1.0)
-
-        t_math = flop_count / (peak_tflops * 1e12)
-        t_comm = bytes_used / (self.hardware.peak_bandwidth_gb_s * 1e9)
-        pred_time_s = max(t_math, t_comm)
-        predicted_time_us = pred_time_s * 1e6
-        predicted_tflops = (flop_count / pred_time_s) / 1e12 if pred_time_s > 0 else 0
-        critical_ai = self.hardware.critical_ai(precision)
-        bottleneck = "memory" if t_comm >= t_math else "compute"
 
         return {
-            "predicted_time_us": predicted_time_us,
+            "predicted_time_us": pred_time_s * 1e6,
             "predicted_tflops": predicted_tflops,
             "ai": ai,
             "critical_ai": critical_ai,
