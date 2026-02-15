@@ -94,7 +94,7 @@ function numLevels(fmt) {
 const HW_PRESETS = {
   "A100 SXM":      { bw: 2039, bwRange:[1900,2100], flops:{FP32:19.5,FP16:312,BF16:312,FP8_E4M3:0,NVFP4:0,MXFP4:0,INT8:624,INT4:0}, note:"Ampere · 3rd-gen TC · HBM2e" },
   "H100 SXM":      { bw: 3350, bwRange:[3100,3400], flops:{FP32:67,FP16:134,BF16:134,FP8_E4M3:1979,NVFP4:0,MXFP4:0,INT8:1979,INT4:3958}, note:"Hopper · FP8 TC · HBM3" },
-  "GB10 Blackwell": { bw: 287, bwRange:[250,320], flops:{FP32:31,FP16:62,BF16:62,FP8_E4M3:124,NVFP4:1000,MXFP4:1000,INT8:124,INT4:248}, note:"Blackwell B10 · GX10 · 128GB LPDDR5X · measured" },
+  "GB10 Blackwell": { bw: 287, bwRange:[250,320], flops:{FP32:31,FP16:62,BF16:62,FP8_E4M3:124,FP8_E5M2:124,NVFP4:1000,MXFP4:1000,INT8:124,INT4:248}, note:"Blackwell B10 (GX10) · 128GB LPDDR5X · measured" },
   "B200":          { bw: 8000, bwRange:[7500,8500], flops:{FP32:90,FP16:180,BF16:180,FP8_E4M3:4500,NVFP4:9000,MXFP4:9000,INT8:4500,INT4:9000}, note:"Blackwell · NVFP4/MXFP4 TC · HBM3e" },
   "B300 Ultra":    { bw: 12000, bwRange:[10000,14000], flops:{FP32:125,FP16:250,BF16:250,FP8_E4M3:7000,NVFP4:14000,MXFP4:14000,INT8:7000,INT4:14000}, note:"Blackwell Ultra · Est. specs" },
   "Custom ASIC":   { bw: 4000, bwRange:[500,20000], flops:{FP32:50,FP16:100,BF16:100,FP8_E4M3:2000,NVFP4:8000,MXFP4:8000,INT8:2000,INT4:8000}, note:"Define your own" },
@@ -452,13 +452,24 @@ function RooflinePlot({ ops, hw, pinned, showBands, measuredPoints = [], simulat
       el.attr("fill",col).attr("opacity",op).attr("stroke","#0f172a").attr("stroke-width",.5).style("cursor","pointer")
         .on("mouseenter",(e)=>{
           const pk = (hw.flops[hwFlopsKey(pt.cp)]||0)*1e12;
-          const bn = pk <= pt.ai*bw ? "COMPUTE" : "MEMORY";
+          const critAI = pk / bw;
+          const bn = pt.ai < critAI ? "MEMORY" : "COMPUTE";
           const eff = pk > 0 ? (pt.perf/pk*100).toFixed(1) : "—";
           tip.style("display","block").style("left",(e.offsetX+10)+"px").style("top",(e.offsetY-10)+"px")
             .html(`<b>${pt.name}</b>${pt.set!=="current"?` [${pt.set}]`:""}<br/>AI: ${pt.ai.toFixed(2)} · ${bn}<br/>GFLOP: ${(pt.flops/1e9).toFixed(1)} · MB: ${(pt.bytes/1e6).toFixed(1)}<br/>Eff: ${eff}% · ${(pt.flops/pt.perf*1e6).toFixed(0)}μs`);
         }).on("mouseleave",()=>tip.style("display","none"));
     }
 
+    // Precision color mapping (for measured points)
+    const PRECISION_COLORS = {
+      "FP16": "#f97316",
+      "BF16": "#fb923c",
+      "FP8_E4M3": "#22c55e",
+      "FP8_E5M2": "#16a34a",
+      "NVFP4": "#a855f7",
+      "INT8": "#06b6d4",
+      "INT4": "#3b82f6",
+    };
     // Simulated (predicted) points overlay (from GEMM Analyzer)
     for (const spt of simulatedPoints) {
       if (!spt.ai || !spt.tflops) continue;
@@ -482,16 +493,20 @@ function RooflinePlot({ ops, hw, pinned, showBands, measuredPoints = [], simulat
       if (perf < yMin) continue;
       const cx = xS(Math.max(xD[0], Math.min(xD[1], mpt.ai)));
       const cy = yS(Math.max(yMin, Math.min(yMax, perf)));
-      // Measured = hollow circle with thick border
+
+      // Color by precision
+      const color = PRECISION_COLORS[mpt.precision] || "#22c55e";
+
+      // Measured = hollow circle with colored stroke
       g.append("circle").attr("cx",cx).attr("cy",cy).attr("r",6)
-        .attr("fill","none").attr("stroke","#22c55e").attr("stroke-width",2.5).attr("opacity",.9)
+        .attr("fill","none").attr("stroke",color).attr("stroke-width",2.5).attr("opacity",.9)
         .style("cursor","pointer")
         .on("mouseenter",(e)=>{
           tip.style("display","block").style("left",(e.offsetX+10)+"px").style("top",(e.offsetY-10)+"px")
-            .html(`<b>${mpt.label || "Measured"}</b><br/>AI: ${mpt.ai.toFixed(2)}<br/>TFLOPS: ${mpt.tflops.toFixed(2)}<br/>${mpt.time_us ? mpt.time_us.toFixed(1)+"us" : ""}${mpt.bandwidth_gb_s ? "<br/>BW: "+mpt.bandwidth_gb_s.toFixed(1)+" GB/s" : ""}`);
+            .html(`<b>${mpt.label || "Measured"}</b><br/>AI: ${mpt.ai.toFixed(2)}<br/>TFLOPS: ${mpt.tflops.toFixed(2)}<br/>${mpt.time_us ? mpt.time_us.toFixed(1)+"μs" : ""}${mpt.bandwidth_gb_s ? "<br/>BW: "+mpt.bandwidth_gb_s.toFixed(1)+" GB/s" : ""}`);
         }).on("mouseleave",()=>tip.style("display","none"));
       // Label
-      g.append("text").attr("x",cx+8).attr("y",cy+3).attr("fill","#22c55e").attr("font-size",8).attr("font-family","monospace").text("M");
+      g.append("text").attr("x",cx+8).attr("y",cy+3).attr("fill",color).attr("font-size",8).attr("font-family","monospace").text("M");
     }
 
     // Axes
@@ -539,7 +554,8 @@ function OpTable({ ops, hw }) {
           const pk = (hw.flops[hwFlopsKey(o.cp)]||1)*1e12;
           const at = attainable(o.ai, (hw.flops[hwFlopsKey(o.cp)]||1), bwVal);
           const t = o.flops / at;
-          const bn = pk <= o.ai * bwVal * 1e9 ? "C" : "M";
+          const critAI = pk / (bwVal * 1e9);
+          const bn = o.ai < critAI ? "M" : "C";
           return <tr key={i} style={{borderBottom:"1px solid #1e293b10",color:"#cbd5e1"}}>
             <td style={{padding:"2px 4px",display:"flex",gap:4,alignItems:"center"}}>
               <span style={{width:6,height:6,borderRadius:o.type==="gemm"?"50%":1,background:TC[o.type],display:"inline-block"}} />{o.name}{o.count>1&&<span style={{color:"#64748b"}}>×{o.count}</span>}</td>
@@ -841,6 +857,7 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
   const [N, setN] = useState(4096);
   const [K, setK] = useState(4096);
   const [precision, setPrecision] = useState("FP16");
+  const [runAllPrecisions, setRunAllPrecisions] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -859,7 +876,7 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
     setLoading(true);
     setError(null);
     try {
-      const resp = await fetch(`${API_BASE}/api/analyze?hardware_key=${hwKey}`, {
+      const resp = await fetch(`${API_BASE}/api/analyze?hardware_key=${hwKey}&run_all_precisions=${runAllPrecisions}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ M, N, K, precision }),
@@ -867,7 +884,7 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
       if (!resp.ok) throw new Error(`API error: ${resp.status}`);
       const data = await resp.json();
       setResult(data);
-      // Pass simulated (predicted) and measured points up for roofline overlay
+      // Pass simulated and measured points up for roofline overlay
       if (onSimulatedPoints && data.simulated?.length > 0) {
         onSimulatedPoints(data.simulated);
       }
@@ -949,6 +966,17 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
             {precOptions.map(p=><option key={p} value={p}>{FORMATS[p]?.label||p}</option>)}
           </select>
         </div>
+        <div style={{marginBottom:8}}>
+          <label style={{fontSize:11,color:"#cbd5e1",cursor:"pointer",display:"flex",alignItems:"center"}}>
+            <input
+              type="checkbox"
+              checked={runAllPrecisions}
+              onChange={(e) => setRunAllPrecisions(e.target.checked)}
+              style={{marginRight:6}}
+            />
+            Run all precisions (FP16, FP8, NVFP4, INT8, INT4)
+          </label>
+        </div>
         <button onClick={analyze} disabled={loading} style={{...btn2,opacity:loading?.6:1}}>
           {loading ? "Analyzing..." : "Analyze GEMM"}
         </button>
@@ -965,11 +993,24 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
               <div>Bottleneck: <span style={{color:result.simulated[0].bottleneck==="memory"?"#60a5fa":"#f87171"}}>{result.simulated[0].bottleneck?.toUpperCase()}</span></div>
             </div>
           )}
-          {result.measured && result.measured[0] && (
+          {result.measured && result.measured.length > 0 && (
             <div style={{marginTop:4,color:"#94a3b8",lineHeight:1.8}}>
-              <div style={{color:"#22c55e"}}>Measured: {result.measured[0].time_us.toFixed(1)} us</div>
-              <div>Throughput: {result.measured[0].tflops.toFixed(2)} TFLOPS</div>
-              {result.measured[0].bandwidth_gb_s && <div>BW: {result.measured[0].bandwidth_gb_s.toFixed(1)} GB/s</div>}
+              {result.measured.length === 1 ? (
+                <>
+                  <div style={{color:"#22c55e"}}>Measured: {result.measured[0].time_us.toFixed(1)} μs</div>
+                  <div>Throughput: {result.measured[0].tflops.toFixed(2)} TFLOPS</div>
+                  {result.measured[0].bandwidth_gb_s && <div>BW: {result.measured[0].bandwidth_gb_s.toFixed(1)} GB/s</div>}
+                </>
+              ) : (
+                <>
+                  <div style={{color:"#22c55e",marginBottom:4}}>Measured {result.measured.length} precisions:</div>
+                  {result.measured.map((m, idx) => (
+                    <div key={idx} style={{fontSize:9,marginBottom:2}}>
+                      <span style={{color:FORMATS[m.precision]?.color||"#22c55e"}}>{m.precision}</span>: {m.tflops.toFixed(2)} TFLOPS · {m.time_us.toFixed(1)} μs
+                    </div>
+                  ))}
+                </>
+              )}
             </div>
           )}
           {result.recommendation && (
@@ -1052,7 +1093,8 @@ export default function App() {
   const totTimeS = totF / aggPerf;
   const toks = phase === "prefill" ? S : 1;
   const tokS = toks / totTimeS;
-  const bound = peakT * 1e12 <= aggAI * hw.bw * 1e9 ? "COMPUTE" : "MEMORY";
+  const criticalAI = peakT > 0 && hw.bw > 0 ? (peakT * 1e12) / (hw.bw * 1e9) : 200;
+  const bound = aggAI < criticalAI ? "MEMORY" : "COMPUTE";
 
   const pin = () => {
     const lbl = `${hwName.slice(0,6)}·${cfgName.slice(0,10)}·${phase[0]}${S}`;

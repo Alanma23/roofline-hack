@@ -123,9 +123,10 @@ _mount_frontend()
 
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
-def analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10"):
+def analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10", run_all_precisions: bool = False):
     """
     Analyze a single GEMM: simulated roofline + measured (if GPU) + recommendation + tiling.
+    If run_all_precisions=True, runs benchmarks for FP16, FP8, NVFP4, INT8, INT4.
     """
     try:
         hw = get_hardware(hardware_key)
@@ -162,22 +163,49 @@ def analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10"):
         try:
             from benchmarks.kernel_shell import GEMMKernel, GEMVKernel
 
-            if M <= 1:
-                kernel = GEMVKernel(N, K, spec.precision)
+            if run_all_precisions:
+                # Run sequential benchmarks for all precisions
+                precisions_to_test = ["FP16", "FP8_E4M3", "NVFP4", "INT8", "INT4"]
+                for prec in precisions_to_test:
+                    try:
+                        if M <= 1:
+                            kernel = GEMVKernel(N, K, prec)
+                        else:
+                            kernel = GEMMKernel(M, N, K, prec)
+                        meas = kernel.benchmark(num_iters=30)
+                        meas_points.append(RooflinePoint(
+                            ai=meas["ai"],
+                            tflops=meas["measured_tflops"],
+                            time_us=meas["measured_time_us"],
+                            label=f"{M}x{N}x{K} [{prec}]",
+                            source="measured",
+                            precision=prec,
+                            shape=f"{M}x{N}x{K}",
+                            bandwidth_gb_s=meas["measured_bandwidth_gb_s"],
+                        ))
+                        if nvml_data is None:
+                            nvml_data = meas.get("nvml")
+                    except Exception:
+                        # Skip precision if benchmark fails
+                        pass
             else:
-                kernel = GEMMKernel(M, N, K, spec.precision)
-            meas = kernel.benchmark(num_iters=30)
-            meas_points.append(RooflinePoint(
-                ai=meas["ai"],
-                tflops=meas["measured_tflops"],
-                time_us=meas["measured_time_us"],
-                label=f"GEMM {M}x{N}x{K} [{spec.precision}] (measured)",
-                source="measured",
-                precision=spec.precision,
-                shape=f"{M}x{N}x{K}",
-                bandwidth_gb_s=meas["measured_bandwidth_gb_s"],
-            ))
-            nvml_data = meas.get("nvml")
+                # Single precision benchmark (existing behavior)
+                if M <= 1:
+                    kernel = GEMVKernel(N, K, spec.precision)
+                else:
+                    kernel = GEMMKernel(M, N, K, spec.precision)
+                meas = kernel.benchmark(num_iters=30)
+                meas_points.append(RooflinePoint(
+                    ai=meas["ai"],
+                    tflops=meas["measured_tflops"],
+                    time_us=meas["measured_time_us"],
+                    label=f"GEMM {M}x{N}x{K} [{spec.precision}] (measured)",
+                    source="measured",
+                    precision=spec.precision,
+                    shape=f"{M}x{N}x{K}",
+                    bandwidth_gb_s=meas["measured_bandwidth_gb_s"],
+                ))
+                nvml_data = meas.get("nvml")
         except Exception:
             pass
 
