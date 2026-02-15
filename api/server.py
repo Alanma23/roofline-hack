@@ -49,6 +49,7 @@ from api.schemas import (
     GEMMSpec, HardwareSpecInput, RooflinePoint, RooflineLine,
     TilingResult, RecommendationResult, AnalyzeResponse, SweepResponse,
     NVMLStatusResponse, HardwareListItem,
+    ImportBenchmarkResponse, FlexibleImportRequest, SimplifiedBenchmarkPoint,
 )
 
 app = FastAPI(title="Blackwell GEMM Roofline Analyzer", version="1.0.0")
@@ -185,9 +186,11 @@ def analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10", run_all_precisions: 
                         ))
                         if nvml_data is None:
                             nvml_data = meas.get("nvml")
-                    except Exception:
+                    except Exception as e:
                         # Skip precision if benchmark fails
-                        pass
+                        import traceback
+                        print(f"[BENCHMARK ERROR] {prec}: {e}")
+                        traceback.print_exc()
             else:
                 # Single precision benchmark (existing behavior)
                 if M <= 1:
@@ -206,8 +209,10 @@ def analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10", run_all_precisions: 
                     bandwidth_gb_s=meas["measured_bandwidth_gb_s"],
                 ))
                 nvml_data = meas.get("nvml")
-        except Exception:
-            pass
+        except Exception as e:
+            import traceback
+            print(f"[BENCHMARK ERROR] {spec.precision}: {e}")
+            traceback.print_exc()
 
     # Recommendation
     rec = recommend_quantization(hardware=hw, M=M, N=N, K=K)
@@ -466,6 +471,65 @@ def get_recommendation(spec: GEMMSpec, hardware_key: str = "b10"):
     )
 
 
+@app.post("/api/import-benchmarks", response_model=ImportBenchmarkResponse)
+def import_benchmarks(req: FlexibleImportRequest):
+    """Import externally-collected benchmark data (no GPU required)."""
+    accepted_points = []
+    errors = []
+
+    # Process full-format points
+    if req.points:
+        for i, pt in enumerate(req.points):
+            try:
+                if pt.ai <= 0 or pt.tflops <= 0 or pt.time_us <= 0:
+                    errors.append(f"Point {i}: ai/tflops/time_us must be > 0")
+                    continue
+                pt_dict = pt.dict()
+                pt_dict["source"] = "measured"
+                accepted_points.append(RooflinePoint(**pt_dict))
+            except Exception as e:
+                errors.append(f"Point {i}: {str(e)}")
+
+    # Process simplified-format points
+    if req.simplified:
+        for i, sp in enumerate(req.simplified):
+            try:
+                shape_parts = [int(x) for x in sp.shape.split("x")]
+                if len(shape_parts) == 2:
+                    N, K = shape_parts
+                    flops = 2 * N * K
+                    bpe = bytes_per_element(sp.precision)
+                    bytes_total = K * bpe + N * K * bpe + N * 2
+                elif len(shape_parts) == 3:
+                    M, N, K = shape_parts
+                    flops = 2 * M * N * K
+                    bpe = bytes_per_element(sp.precision)
+                    bytes_total = (M * K + K * N) * bpe + M * N * 2
+                else:
+                    errors.append(f"Point {i}: shape must be NxK or MxNxK")
+                    continue
+
+                ai = sp.ai if sp.ai else flops / bytes_total
+                tflops = sp.tflops if sp.tflops else flops / (sp.time_us * 1e-6) / 1e12
+                bw = sp.bandwidth_gb_s if sp.bandwidth_gb_s else bytes_total / (sp.time_us * 1e-6) / 1e9
+                label = sp.label or f"{sp.shape} [{sp.precision}]"
+
+                accepted_points.append(RooflinePoint(
+                    ai=ai, tflops=tflops, time_us=sp.time_us,
+                    label=label, source="measured", precision=sp.precision,
+                    shape=sp.shape, bandwidth_gb_s=bw,
+                ))
+            except Exception as e:
+                errors.append(f"Point {i}: {str(e)}")
+
+    return ImportBenchmarkResponse(
+        accepted=len(accepted_points),
+        rejected=len(errors),
+        points=accepted_points,
+        errors=errors,
+    )
+
+
 @app.post("/api/tiling", response_model=List[TilingResult])
 def tiling_analysis(
     M: int = 4096, N: int = 4096, K: int = 4096,
@@ -570,6 +634,12 @@ def public_recommend(spec: GEMMSpec, hardware_key: str = "b10"):
         memory_bound=rec.memory_bound,
         memory_savings_pct=rec.memory_savings_pct,
     )
+
+
+@public_router.post("/import-benchmarks", response_model=ImportBenchmarkResponse)
+def public_import_benchmarks(req: FlexibleImportRequest):
+    """Import externally-collected benchmark data (public, no GPU required)."""
+    return import_benchmarks(req)
 
 
 app.include_router(public_router)

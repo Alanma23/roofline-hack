@@ -36,6 +36,32 @@ class RooflinePoint(BaseModel):
     bandwidth_gb_s: Optional[float] = None
 
 
+class SimplifiedBenchmarkPoint(BaseModel):
+    """Simplified format - auto-calculates AI, TFLOPS from shape + time."""
+    shape: str                          # "4096x4096" or "4096x4096x4096"
+    precision: str                      # "FP16", "FP8_E4M3", etc.
+    time_us: float                      # measured execution time
+    tflops: Optional[float] = None      # computed if omitted
+    ai: Optional[float] = None          # computed if omitted
+    bandwidth_gb_s: Optional[float] = None
+    label: Optional[str] = None
+    source: str = "measured"
+
+
+class FlexibleImportRequest(BaseModel):
+    """Accepts full RooflinePoint array or simplified format."""
+    points: Optional[List[RooflinePoint]] = None
+    simplified: Optional[List[SimplifiedBenchmarkPoint]] = None
+
+
+class ImportBenchmarkResponse(BaseModel):
+    """Response from import endpoint."""
+    accepted: int
+    rejected: int
+    points: List[RooflinePoint]
+    errors: List[str]
+
+
 class RooflineLine(BaseModel):
     """A roofline ceiling line."""
     precision: str

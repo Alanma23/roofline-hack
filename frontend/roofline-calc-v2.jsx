@@ -674,6 +674,8 @@ function SweepPanel({ hwKey, onPoints }) {
       const data = await r.json();
       const sim = (data.points || []).filter(p => p.source === "simulated");
       const meas = (data.points || []).filter(p => p.source === "measured");
+      console.log('[SweepPanel] Simulated points:', sim);
+      console.log('[SweepPanel] Measured points:', meas);
       onPoints(sim, meas);
       setStatus(`Done: ${sim.length} predicted, ${meas.length} measured`);
     } catch (e) {
@@ -768,6 +770,8 @@ function BenchmarkPanel({ hwKey, onMeasuredPoints }) {
       }
       setProgress("Complete");
       const pts = collected.filter(r => r.ai != null && !r.error).map(r => ({ ai: r.ai, tflops: r.tflops, time_us: r.time_us, bandwidth_gb_s: r.bandwidth_gb_s, label: `${r.shape} [${r.precision}]`, precision: r.precision, shape: r.shape }));
+      console.log('[BenchmarkPanel] Collected benchmark results:', collected);
+      console.log('[BenchmarkPanel] Adding measured points to plot:', pts);
       if (onMeasuredPoints && pts.length) onMeasuredPoints(pts);
     } catch (e) {
       setError(e.message);
@@ -858,6 +862,114 @@ function BenchmarkPanel({ hwKey, onMeasuredPoints }) {
   );
 }
 
+function ImportBenchmarkPanel({ onMeasuredPoints }) {
+  const [jsonText, setJsonText] = useState("");
+  const [showExample, setShowExample] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  const EXAMPLE_SIMPLIFIED = JSON.stringify({
+    simplified: [
+      { shape: "4096x4096", precision: "FP16", time_us: 203.4 },
+      { shape: "4096x4096", precision: "FP8_E4M3", time_us: 34.8 },
+      { shape: "4096x4096x4096", precision: "FP16", time_us: 14339.4 },
+      { shape: "4096x4096x4096", precision: "FP8_E4M3", time_us: 834.0 }
+    ]
+  }, null, 2);
+
+  const doImport = async () => {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const parsed = JSON.parse(jsonText);
+      const resp = await fetch(`${API_BASE}/api/import-benchmarks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `API error: ${resp.status}`);
+      }
+      const data = await resp.json();
+      setResult(data);
+      if (data.points?.length > 0 && onMeasuredPoints) {
+        onMeasuredPoints(data.points);
+      }
+    } catch (e) {
+      setError(e instanceof SyntaxError ? "Invalid JSON" : e.message);
+    }
+    setLoading(false);
+  };
+
+  const P = { background:"#0f172a", borderRadius:6, padding:10, border:"1px solid #1e293b", fontSize:10, fontFamily:"monospace" };
+  const btn2 = { background:"#3b82f6", color:"#fff", border:"none", borderRadius:3, padding:"6px 12px", fontSize:11, cursor:"pointer", fontFamily:"monospace" };
+
+  return (
+    <div style={P}>
+      <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>
+        Import GB10 Benchmarks
+      </div>
+      <div style={{fontSize:9,color:"#64748b",marginBottom:8}}>
+        Paste benchmark JSON (simplified format: shape + precision + time_us)
+      </div>
+
+      <button onClick={() => setShowExample(!showExample)}
+        style={{...btn2, background:"#1e293b", marginBottom:6, width:"100%", fontSize:9}}>
+        {showExample ? "Hide" : "Show"} example format
+      </button>
+
+      {showExample && (
+        <div style={{marginBottom:8}}>
+          <pre style={{background:"#080d18",padding:6,borderRadius:4,fontSize:8,color:"#94a3b8",
+            overflowX:"auto",maxHeight:120,border:"1px solid #1e293b",whiteSpace:"pre-wrap"}}>
+            {EXAMPLE_SIMPLIFIED}
+          </pre>
+          <button onClick={() => setJsonText(EXAMPLE_SIMPLIFIED)}
+            style={{...btn2,background:"#1e293b",fontSize:8,padding:"2px 8px"}}>
+            Use example
+          </button>
+        </div>
+      )}
+
+      <textarea
+        value={jsonText}
+        onChange={e => setJsonText(e.target.value)}
+        placeholder='{"simplified": [{"shape":"4096x4096","precision":"FP16","time_us":203.4}]}'
+        rows={8}
+        style={{width:"100%",background:"#080d18",color:"#e2e8f0",border:"1px solid #334155",
+          borderRadius:4,padding:6,fontSize:9,fontFamily:"monospace",resize:"vertical",
+          outline:"none",marginBottom:6}}
+      />
+
+      <button onClick={doImport} disabled={loading || !jsonText.trim()}
+        style={{...btn2,width:"100%",opacity:(loading || !jsonText.trim()) ? 0.6 : 1}}>
+        {loading ? "Importing..." : "Validate & Import"}
+      </button>
+
+      {error && (
+        <div style={{marginTop:6,padding:6,background:"#1e293b",borderRadius:4,color:"#f87171",fontSize:9}}>
+          {error}
+        </div>
+      )}
+
+      {result && (
+        <div style={{marginTop:6,padding:6,background:"#1e293b",borderRadius:4,fontSize:9}}>
+          <div style={{color:"#22c55e"}}>✓ Imported {result.accepted} points</div>
+          {result.rejected > 0 && <div style={{color:"#fbbf24"}}>{result.rejected} rejected</div>}
+          {result.errors.length > 0 && (
+            <div style={{marginTop:4,color:"#f87171",fontSize:8}}>
+              {result.errors.slice(0,3).map((e,i) => <div key={i}>• {e}</div>)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
   const [M, setM] = useState(4096);
   const [N, setN] = useState(4096);
@@ -892,10 +1004,18 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
       setResult(data);
       // Pass simulated and measured points up for roofline overlay
       if (onSimulatedPoints && data.simulated?.length > 0) {
+        console.log('[GEMMAnalyzer] Received simulated points:', data.simulated);
         onSimulatedPoints(data.simulated);
       }
       if (data.measured && data.measured.length > 0 && onMeasuredPoints) {
+        console.log('[GEMMAnalyzer] Received measured points:', data.measured);
         onMeasuredPoints(data.measured);
+      } else {
+        console.warn('[GEMMAnalyzer] No measured points received. CUDA available?', {
+          hasMeasured: !!data.measured,
+          measuredLength: data.measured?.length,
+          nvml: data.nvml
+        });
       }
     } catch (e) {
       setError(e.message);
@@ -1084,6 +1204,14 @@ export default function App() {
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
   const [highlightedSection, setHighlightedSection] = useState(null);
+  const [cudaAvailable, setCudaAvailable] = useState(null);
+
+  // Check CUDA availability on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/api/nvml/status`)
+      .then(r => setCudaAvailable(r.status === 200))
+      .catch(() => setCudaAvailable(false));
+  }, []);
 
   const applyHw = useCallback(n => { setHwName(n); setHw({...HW_PRESETS[n]}); }, []);
   const model = MODELS[modelName];
@@ -1195,6 +1323,16 @@ export default function App() {
           {Object.entries(TC).map(([t,c]) => <span key={t} style={{color:c}}>{t==="gemm"?"●":t==="attention"?"◆":"■"} {t}</span>)}
         </div>
       </div>
+
+      {/* CUDA Status Warning */}
+      {cudaAvailable === false && (
+        <div style={{
+          background: "#dc2626", color: "#fff", padding: 8,
+          borderRadius: 4, fontSize: 10, marginBottom: 8, fontWeight: 500
+        }}>
+          ⚠️ CUDA not available on server - measured benchmarks disabled (simulation only)
+        </div>
+      )}
 
       {/* NL bar */}
       <div style={{ ...P, display:"flex", gap:6, alignItems:"center", padding:8, marginBottom:10 }}>
@@ -1324,11 +1462,17 @@ export default function App() {
             <button onClick={()=>setRightTab("kernel")} style={btn(rightTab==="kernel")}>Kernel</button>
             <button onClick={()=>setRightTab("sweep")} style={btn(rightTab==="sweep")}>GB10 Sweep</button>
             <button onClick={()=>setRightTab("benchmark")} style={btn(rightTab==="benchmark")}>Benchmark</button>
+            <button onClick={()=>setRightTab("import")} style={btn(rightTab==="import")}>Import</button>
             <button onClick={()=>setRightTab("format")} style={btn(rightTab==="format")}>Format</button>
           </div>
           {rightTab === "benchmark" && (
             <BenchmarkPanel
               hwKey={HW_NAME_TO_API_KEY[hwName] || "b10"}
+              onMeasuredPoints={(pts) => setMeasuredPoints(prev => [...prev, ...pts])}
+            />
+          )}
+          {rightTab === "import" && (
+            <ImportBenchmarkPanel
               onMeasuredPoints={(pts) => setMeasuredPoints(prev => [...prev, ...pts])}
             />
           )}
