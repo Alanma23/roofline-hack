@@ -1,11 +1,25 @@
 """
-TorchAO quantization configs for Jetson Orin.
+TorchAO (PyTorch Architecture Optimization) quantization configs.
 
-PTQ: int4_weight_only, int8_weight_only
-AWQ: requires calibration data; use PTQ as fallback when no calibration.
+TorchAO provides native PyTorch quantization primitives. This module wraps
+quantize_(), int4_weight_only(), int8_weight_only() for transformer models.
+
+Supported: INT4 (int4_weight_only), INT8 (int8_weight_only).
+NVFP4/FP8 recommendations map to INT4/INT8 when torchao has no native path.
 """
 
 from typing import Any, Optional
+
+# Precision -> torchao mapping (NVFP4/FP8 recommendations use closest supported)
+PRECISION_TO_TORCHAO = {
+    "INT4": "INT4",
+    "NF4": "INT4",
+    "NVFP4": "INT4",
+    "MXFP4": "INT4",
+    "INT8": "INT8",
+    "FP8_E4M3": "INT8",  # torchao has no FP8 weight-only; INT8 fallback
+    "FP8_E5M2": "INT8",
+}
 
 # Lazy import to allow running without torchao
 _torchao_quantize = None
@@ -51,13 +65,19 @@ def get_quantize_config(
     return None
 
 
+def map_precision_to_torchao(precision: str) -> Optional[str]:
+    """Map roofline recommendation (NVFP4, FP8, etc.) to torchao-supported precision."""
+    p = precision.strip().upper()
+    return PRECISION_TO_TORCHAO.get(p, p if p in ("INT4", "INT8") else None)
+
+
 def apply_quantization(model, precision: str = "INT4", group_size: int = 128) -> bool:
     """
     Apply weight-only quantization to model in-place.
 
     Args:
         model: PyTorch model with Linear layers
-        precision: INT4 or INT8
+        precision: INT4, INT8, NVFP4, FP8, etc. (mapped to torchao-supported)
         group_size: for INT4
 
     Returns:
@@ -66,7 +86,10 @@ def apply_quantization(model, precision: str = "INT4", group_size: int = 128) ->
     q = _ensure_torchao()
     if not q:
         return False
-    config = get_quantize_config(precision, group_size)
+    mapped = map_precision_to_torchao(precision)
+    if mapped is None:
+        return False
+    config = get_quantize_config(mapped, group_size)
     if config is None:
         return False
     q(model, config)
