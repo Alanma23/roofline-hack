@@ -92,7 +92,7 @@ NF4:    4 bits + (16-bit scale / 64) = 4.25 bits
 File: `src/roofline/calculator_shell.py`
 
 **TODO for you:**
-- Define hardware specs (B10: 1000 GB/s, 200 TFLOPS FP16)
+- Define hardware specs (B10: 287 GB/s, 62 TFLOPS FP16)
 - Implement `predict_gemv()` using formulas above
 - Calculate: FLOPs, Bytes, AI, time_memory, time_compute
 - Determine bottleneck (which time is larger?)
@@ -123,11 +123,11 @@ File: `compare_shell.py`
 
 | Operator | Precision | Predicted | Measured | Error |
 |----------|-----------|-----------|----------|-------|
-| GEMV 4K  | FP16      | ~34 μs    | TBD      | TBD   |
-| GEMV 4K  | FP8       | ~17 μs    | TBD      | TBD   |
-| GEMV 4K  | NVFP4     | ~9.5 μs   | TBD      | TBD   |
+| GEMV 4K×4K | FP16    | ~117 μs   | TBD      | TBD   |
+| GEMV 4K×4K | FP8     | ~58 μs    | TBD      | TBD   |
+| GEMV 4K×4K | NVFP4   | ~30 μs    | TBD      | TBD   |
 
-**Speedup:** FP8 should be ~2.0× faster than FP16, NVFP4 ~3.5× faster
+**Speedup:** FP8 should be ~2.0× faster than FP16, NVFP4 ~4.0× faster
 
 ---
 
@@ -135,7 +135,7 @@ File: `compare_shell.py`
 
 **Why memory-bound?**
 - GEMV AI = 1.0 (FP16) or 2.0 (FP8)
-- Critical AI = 200 (B10 FP16)
+- Critical AI = 216 (B10 FP16: 62 TFLOPS / 287 GB/s)
 - AI << Critical AI → bandwidth limits performance
 
 **Why does quantization help?**
@@ -146,11 +146,67 @@ File: `compare_shell.py`
 
 ---
 
+## 🌐 Remote Benchmarking via SSH Tunnel
+
+**NEW:** Run benchmarks on GB10 (remote GPU) from Mac (no CUDA needed locally).
+
+### Setup (5 minutes)
+
+1. **On GB10:** Start API server
+   ```bash
+   cd ~/roofline-hack
+   uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+2. **On Mac:** Create SSH tunnel
+   ```bash
+   ssh -L 8000:localhost:8000 user@gb10-hostname
+   ```
+
+3. **On Mac:** Start frontend
+   ```bash
+   cd frontend && npm run dev
+   ```
+
+### Kernel Spot Check Feature
+
+**Location:** Frontend → Right sidebar → "Kernel Spot Check" panel
+
+**Usage:**
+1. Enter GEMM shape: M, N, K (or use quick presets)
+2. Select precision: FP16, FP8, NVFP4, INT8, INT4
+3. **Optional:** Check "Run all precisions" for sweep
+4. Click "Analyze GEMM"
+
+**Results:**
+- Hollow colored circles on roofline plot
+- Color-coded by precision:
+  - Orange: FP16
+  - Green: FP8_E4M3
+  - Purple: NVFP4
+  - Cyan: INT8
+  - Blue: INT4
+- Hover for detailed metrics (AI, TFLOPS, time, bandwidth)
+
+### Precision Sweep Mode
+
+When "Run all precisions" is checked:
+- Runs 5 benchmarks sequentially (FP16, FP8, NVFP4, INT8, INT4)
+- Same M×N×K shape, different precisions
+- All results plotted together for comparison
+- Takes ~30-60 seconds total (30 iterations per precision)
+
+**Use case:** Compare how different precisions perform for the same workload.
+
+See `SSH_TUNNEL_SETUP.md` for detailed setup and troubleshooting.
+
+---
+
 ## 📚 Reference
 
-- **Theory formulas:** `docs/THEORY_MATH.md`
-- **Precision catalog:** `docs/THEORY_FORMATS.md`
+- **Theory & formulas:** `THEORY.md` (roofline fundamentals + precision catalog)
 - **Frontend reference:** `frontend/roofline-calc-v2.jsx` (lines 148-208)
+- **SSH tunnel setup:** `SSH_TUNNEL_SETUP.md` (remote benchmarking guide)
 
 ---
 
