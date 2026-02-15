@@ -94,7 +94,7 @@ function numLevels(fmt) {
 const HW_PRESETS = {
   "A100 SXM":      { bw: 2039, bwRange:[1900,2100], flops:{FP32:19.5,FP16:312,BF16:312,FP8_E4M3:0,NVFP4:0,MXFP4:0,INT8:624,INT4:0}, note:"Ampere · 3rd-gen TC · HBM2e" },
   "H100 SXM":      { bw: 3350, bwRange:[3100,3400], flops:{FP32:67,FP16:134,BF16:134,FP8_E4M3:1979,NVFP4:0,MXFP4:0,INT8:1979,INT4:3958}, note:"Hopper · FP8 TC · HBM3" },
-  "GB10 Blackwell": { bw: 1000, bwRange:[800,1200], flops:{FP32:10,FP16:200,BF16:200,FP8_E4M3:400,NVFP4:800,MXFP4:800,INT8:400,INT4:800}, note:"Blackwell B10 · Desktop · Placeholder specs" },
+  "GB10 Blackwell": { bw: 287, bwRange:[250,320], flops:{FP32:31,FP16:62,BF16:62,FP8_E4M3:124,NVFP4:1000,MXFP4:1000,INT8:124,INT4:248}, note:"Blackwell B10 · GX10 · 128GB LPDDR5X · measured" },
   "B200":          { bw: 8000, bwRange:[7500,8500], flops:{FP32:90,FP16:180,BF16:180,FP8_E4M3:4500,NVFP4:9000,MXFP4:9000,INT8:4500,INT4:9000}, note:"Blackwell · NVFP4/MXFP4 TC · HBM3e" },
   "B300 Ultra":    { bw: 12000, bwRange:[10000,14000], flops:{FP32:125,FP16:250,BF16:250,FP8_E4M3:7000,NVFP4:14000,MXFP4:14000,INT8:7000,INT4:14000}, note:"Blackwell Ultra · Est. specs" },
   "Custom ASIC":   { bw: 4000, bwRange:[500,20000], flops:{FP32:50,FP16:100,BF16:100,FP8_E4M3:2000,NVFP4:8000,MXFP4:8000,INT8:2000,INT4:8000}, note:"Define your own" },
@@ -230,6 +230,31 @@ function getOptimizationResponse(query) {
   return { message: "Try: 'How can I speed up decode?' or 'Why is it memory bound?' Check the What to do panel for recommendations.", highlightSection: "what_to_do" };
 }
 
+// Ollama chat for deeper insight (what to tune, what's happening)
+const OLLAMA_BASE = "";
+const OLLAMA_MODEL = "llama3.2";
+
+async function askOllama(context, query) {
+  try {
+    const r = await fetch(`${OLLAMA_BASE}/ollama/api/chat`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        stream: false,
+        messages: [
+          { role: "system", content: `You are a roofline/GPU performance expert. Give concise actionable advice. Be specific about precision, bottleneck, and what to try next.` },
+          { role: "user", content: `Current setup:\n${context}\n\nQuestion: ${query}\n\nAnswer briefly (2-4 sentences) with specific recommendations:` },
+        ],
+      }),
+    });
+    if (!r.ok) throw new Error(`Ollama ${r.status}`);
+    const d = await r.json();
+    return d.message?.content?.trim() || "No response.";
+  } catch {
+    return null;
+  }
+}
+
 // ═══════════════════════════════════════════════
 //  NL PARSER
 // ═══════════════════════════════════════════════
@@ -352,7 +377,7 @@ const PW = 680, PH = 400, MG = { t: 28, r: 24, b: 46, l: 62 };
 const iw = PW - MG.l - MG.r, ih = PH - MG.t - MG.b;
 const TC = { gemm: "#60a5fa", attention: "#f472b6", elementwise: "#a3e635" };
 
-function RooflinePlot({ ops, hw, pinned, showBands, measuredPoints = [] }) {
+function RooflinePlot({ ops, hw, pinned, showBands, measuredPoints = [], simulatedPoints = [] }) {
   const ref = useRef();
   const bw = hw.bw * 1e9;
   const ceilings = useMemo(() => Object.entries(hw.flops).filter(([, v]) => v > 0).map(([p, v]) => ({
@@ -434,6 +459,22 @@ function RooflinePlot({ ops, hw, pinned, showBands, measuredPoints = [] }) {
         }).on("mouseleave",()=>tip.style("display","none"));
     }
 
+    // Simulated (predicted) points overlay (from GEMM Analyzer)
+    for (const spt of simulatedPoints) {
+      if (!spt.ai || !spt.tflops) continue;
+      const perf = spt.tflops * 1e12;
+      if (perf < yMin) continue;
+      const cx = xS(Math.max(xD[0], Math.min(xD[1], spt.ai)));
+      const cy = yS(Math.max(yMin, Math.min(yMax, perf)));
+      g.append("circle").attr("cx",cx).attr("cy",cy).attr("r",5)
+        .attr("fill","none").attr("stroke","#60a5fa").attr("stroke-width",1.5).attr("stroke-dasharray","3,2").attr("opacity",.9)
+        .style("cursor","pointer")
+        .on("mouseenter",(e)=>{
+          tip.style("display","block").style("left",(e.offsetX+10)+"px").style("top",(e.offsetY-10)+"px")
+            .html(`<b>${spt.label || "Predicted"}</b><br/>AI: ${spt.ai.toFixed(2)}<br/>TFLOPS: ${spt.tflops.toFixed(2)}<br/>${spt.time_us ? spt.time_us.toFixed(1)+"μs" : ""}`);
+        }).on("mouseleave",()=>tip.style("display","none"));
+      g.append("text").attr("x",cx+7).attr("y",cy+2).attr("fill","#60a5fa").attr("font-size",7).attr("font-family","monospace").text("P");
+    }
     // Measured points overlay (from GEMM Analyzer)
     for (const mpt of measuredPoints) {
       if (!mpt.ai || !mpt.tflops) continue;
@@ -461,7 +502,7 @@ function RooflinePlot({ ops, hw, pinned, showBands, measuredPoints = [] }) {
 
     g.append("text").attr("x",iw/2).attr("y",ih+38).attr("fill","#64748b").attr("text-anchor","middle").attr("font-size",10).attr("font-family","monospace").text("Arithmetic Intensity (FLOP/byte)");
     g.append("text").attr("x",-ih/2).attr("y",-46).attr("fill","#64748b").attr("text-anchor","middle").attr("font-size",10).attr("transform","rotate(-90)").attr("font-family","monospace").text("Attainable FLOP/s");
-  }, [allPts, hw, bw, ceilings, xS, yS, showBands, pinned, yMax, measuredPoints]);
+  }, [allPts, hw, bw, ceilings, xS, yS, showBands, pinned, yMax, measuredPoints, simulatedPoints]);
 
   return (
     <div style={{ position: "relative" }}>
@@ -587,7 +628,8 @@ const HW_NAME_TO_API_KEY = {
 // ═══════════════════════════════════════════════
 //  GEMM ANALYZER — Kernel Spot Check
 // ═══════════════════════════════════════════════
-const API_BASE = ""; // use Vite proxy to localhost:8000
+// Use VITE_API_BASE for remote B10 (e.g. http://192.168.1.100:8000). Empty = Vite proxy to localhost:8000
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 const QUICK_SHAPES = [
   { label: "Decode", M: 1, N: 4096, K: 4096 },
@@ -595,7 +637,206 @@ const QUICK_SHAPES = [
   { label: "Prefill", M: 2048, N: 4096, K: 4096 },
 ];
 
-function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onClearMeasured }) {
+// GB10 iterative sweep — run across shapes/precisions, plot all points
+function SweepPanel({ hwKey, onPoints }) {
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState(null);
+
+  const runSweep = async (mode) => {
+    setLoading(true);
+    setError(null);
+    setStatus(mode === "quick" ? "Quick sweep (3 shapes × 3 precisions)…" : "Full sweep (10 shapes × all precisions)…");
+    try {
+      const params = new URLSearchParams({ hardware_key: hwKey, run_measured: "true" });
+      if (mode === "quick") {
+        params.set("quick", "true");
+        ["FP16", "FP8_E4M3", "NVFP4"].forEach(p => params.append("precisions", p));
+      }
+      const r = await fetch(`${API_BASE}/api/sweep?${params}`, { method: "POST" });
+      if (!r.ok) throw new Error(`Sweep failed: ${r.status}`);
+      const data = await r.json();
+      const sim = (data.points || []).filter(p => p.source === "simulated");
+      const meas = (data.points || []).filter(p => p.source === "measured");
+      onPoints(sim, meas);
+      setStatus(`Done: ${sim.length} predicted, ${meas.length} measured`);
+    } catch (e) {
+      setError(e.message);
+      setStatus("");
+    }
+    setLoading(false);
+  };
+
+  const P = { background:"#0f172a", borderRadius:6, padding:10, border:"1px solid #1e293b", fontSize:10, fontFamily:"monospace" };
+  const btn2 = { background:"#8b5cf6", color:"#fff", border:"none", borderRadius:3, padding:"6px 12px", fontSize:11, cursor:"pointer", fontFamily:"monospace" };
+  return (
+    <div style={P}>
+      <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>GB10 Iterative Sweep</div>
+      <div style={{fontSize:9,color:"#64748b",marginBottom:8}}>Run benchmarks across shapes & precisions to populate the roofline with measured points.</div>
+      <div style={{display:"flex",gap:6,marginBottom:6}}>
+        <button onClick={()=>runSweep("quick")} disabled={loading} style={{...btn2,opacity:loading?0.6:1,flex:1}}>Quick (~30s)</button>
+        <button onClick={()=>runSweep("full")} disabled={loading} style={{...btn2,opacity:loading?0.6:1,flex:1}}>Full (~2min)</button>
+      </div>
+      {status && <div style={{fontSize:9,color:"#94a3b8",marginBottom:4}}>{status}</div>}
+      {error && <div style={{fontSize:9,color:"#f87171"}}>{error}</div>}
+    </div>
+  );
+}
+
+// Live GPU benchmark — saturate GPU with different formats, stream results
+const BENCH_SHAPES = [
+  { label: "Decode", val: "1,4096,4096" },
+  { label: "Prefill", val: "2048,4096,4096" },
+  { label: "Square", val: "4096,4096,4096" },
+];
+const BENCH_PRECISIONS = ["FP16", "BF16", "FP8_E4M3", "NVFP4", "INT8", "INT4"];
+
+function BenchmarkPanel({ hwKey, onMeasuredPoints }) {
+  const [shapes, setShapes] = useState(["1,4096,4096", "2048,4096,4096", "4096,4096,4096"]);
+  const [precs, setPrecs] = useState(["FP16", "FP8_E4M3", "NVFP4", "INT8"]);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [results, setResults] = useState([]);
+  const [error, setError] = useState(null);
+  const abortRef = useRef(null);
+
+  const toggleShape = (val) => {
+    setShapes(prev => prev.includes(val) ? prev.filter(s=>s!==val) : [...prev, val]);
+  };
+  const togglePrec = (p) => {
+    setPrecs(prev => prev.includes(p) ? prev.filter(x=>x!==p) : [...prev, p]);
+  };
+
+  const runBenchmarks = async () => {
+    setRunning(true);
+    setError(null);
+    setResults([]);
+    const shapesStr = shapes.length ? shapes.join(";") : "1,4096,4096;2048,4096,4096;4096,4096,4096";
+    const precStr = precs.length ? precs.join(",") : "FP16,FP8_E4M3,NVFP4,INT8";
+    const url = `${API_BASE}/api/benchmark/stream?hardware_key=${hwKey}&shapes=${encodeURIComponent(shapesStr)}&precisions=${encodeURIComponent(precStr)}`;
+    const collected = [];
+
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`API ${resp.status}`);
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      abortRef.current = () => reader.cancel();
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.error) {
+                const entry = { shape: data.shape || "?", precision: data.precision || "?", error: data.error };
+                collected.push(entry);
+                setResults(r => [...r, entry]);
+              } else if (data.done) {
+                setProgress(`Done: ${data.total} benchmarks`);
+              } else {
+                collected.push(data);
+                setResults(r => [...r, data]);
+                setProgress(`Running ${data.shape} ${data.precision}… (${data.progress || ""})`);
+              }
+            } catch (_) {}
+          }
+        }
+      }
+      setProgress("Complete");
+      const pts = collected.filter(r => r.ai != null && !r.error).map(r => ({ ai: r.ai, tflops: r.tflops, time_us: r.time_us, bandwidth_gb_s: r.bandwidth_gb_s, label: `${r.shape} [${r.precision}]`, precision: r.precision, shape: r.shape }));
+      if (onMeasuredPoints && pts.length) onMeasuredPoints(pts);
+    } catch (e) {
+      setError(e.message);
+      setProgress("");
+    }
+    setRunning(false);
+    abortRef.current = null;
+  };
+
+  const P = { background:"#0f172a", borderRadius:6, padding:10, border:"1px solid #1e293b", fontSize:10, fontFamily:"monospace" };
+  const btn2 = { background:"#22c55e", color:"#0f172a", border:"none", borderRadius:3, padding:"6px 12px", fontSize:11, cursor:"pointer", fontFamily:"monospace", fontWeight:600 };
+  const chk = { accentColor:"#22c55e" };
+
+  return (
+    <div style={P}>
+      <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>Live GPU Benchmark</div>
+      <div style={{fontSize:9,color:"#64748b",marginBottom:8}}>Saturate the GPU with different precisions — see live TFLOPS as each benchmark completes.</div>
+
+      <div style={{fontSize:8,color:"#64748b",marginBottom:3}}>Shapes</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:8}}>
+        {BENCH_SHAPES.map(s=>(
+          <label key={s.val} style={{display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:9}}>
+            <input type="checkbox" checked={shapes.includes(s.val)} onChange={()=>toggleShape(s.val)} style={chk} />
+            {s.label}
+          </label>
+        ))}
+      </div>
+
+      <div style={{fontSize:8,color:"#64748b",marginBottom:3}}>Precisions</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
+        {BENCH_PRECISIONS.map(p=>(
+          <label key={p} style={{display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:9}}>
+            <input type="checkbox" checked={precs.includes(p)} onChange={()=>togglePrec(p)} style={chk} />
+            {FORMATS[p]?.label || p}
+          </label>
+        ))}
+      </div>
+
+      <div style={{display:"flex",gap:6,marginBottom:6}}>
+        <button onClick={runBenchmarks} disabled={running || shapes.length===0 || precs.length===0}
+          style={{...btn2,opacity:(running||!shapes.length||!precs.length)?0.6:1,flex:1}}>
+          {running ? "Running…" : "Run live benchmarks"}
+        </button>
+      </div>
+      {progress && <div style={{fontSize:9,color:"#94a3b8",marginBottom:4}}>{progress}</div>}
+      {error && <div style={{fontSize:9,color:"#f87171",marginBottom:4}}>{error}</div>}
+
+      {results.length > 0 && (
+        <div style={{maxHeight:180,overflowY:"auto",fontSize:9,marginTop:6,border:"1px solid #1e293b",borderRadius:4,padding:4,background:"#080d18"}}>
+          <table style={{width:"100%",borderCollapse:"collapse"}}>
+            <thead>
+              <tr style={{color:"#64748b",borderBottom:"1px solid #1e293b"}}>
+                <th style={{textAlign:"left",padding:"2px 4px"}}>Shape</th>
+                <th style={{textAlign:"left",padding:"2px 4px"}}>Prec</th>
+                <th style={{textAlign:"right",padding:"2px 4px"}}>μs</th>
+                <th style={{textAlign:"right",padding:"2px 4px"}}>TFLOPS</th>
+                <th style={{textAlign:"right",padding:"2px 4px"}}>AI</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((r,i)=>(
+                <tr key={i} style={{borderBottom:"1px solid #1e293b15",color:r.error?"#f87171":"#cbd5e1"}}>
+                  <td style={{padding:"2px 4px"}}>{r.shape||"?"}</td>
+                  <td style={{padding:"2px 4px",color:FORMATS[r.precision]?.color}}>{r.precision||"?"}</td>
+                  <td style={{textAlign:"right",padding:"2px 4px"}}>{r.error?"—":r.time_us?.toFixed(1)}</td>
+                  <td style={{textAlign:"right",padding:"2px 4px"}}>{r.error?"—":r.tflops?.toFixed(2)}</td>
+                  <td style={{textAlign:"right",padding:"2px 4px"}}>{r.error?r.error:r.ai?.toFixed(2)??"—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {results.length > 0 && !running && onMeasuredPoints && (
+        <button onClick={()=>{
+          const pts = results.filter(r=>r.ai!=null).map(r=>({ai:r.ai,tflops:r.tflops,time_us:r.time_us,bandwidth_gb_s:r.bandwidth_gb_s,label:`${r.shape} [${r.precision}]`,precision:r.precision,shape:r.shape}));
+          if(pts.length) onMeasuredPoints(pts);
+        }} style={{...btn2,background:"#8b5cf6",color:"#fff",marginTop:6,width:"100%",fontSize:9}}>
+          Add measured points to roofline
+        </button>
+      )}
+    </div>
+  );
+}
+
+function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
   const [M, setM] = useState(4096);
   const [N, setN] = useState(4096);
   const [K, setK] = useState(4096);
@@ -626,7 +867,10 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onClearMeasured }) {
       if (!resp.ok) throw new Error(`API error: ${resp.status}`);
       const data = await resp.json();
       setResult(data);
-      // Pass measured points up to parent for overlay
+      // Pass simulated (predicted) and measured points up for roofline overlay
+      if (onSimulatedPoints && data.simulated?.length > 0) {
+        onSimulatedPoints(data.simulated);
+      }
       if (data.measured && data.measured.length > 0 && onMeasuredPoints) {
         onMeasuredPoints(data.measured);
       }
@@ -643,12 +887,14 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onClearMeasured }) {
       const timeUs = flops / perf * 1e6;
       const critical = peakT > 0 && hw.bw > 0 ? (peakT * 1e12) / (hw.bw * 1e9) : 0;
       const bound = ai < critical ? "memory" : "compute";
+      const simPt = { ai, tflops: perf / 1e12, time_us: timeUs, label: `${M}x${N}x${K} [${precision}]`, source: "simulated", precision, shape: `${M}x${N}x${K}`, bottleneck: bound };
       setResult({
         hardware: hw.name || hwKey,
-        simulated: [{ ai, tflops: perf / 1e12, time_us: timeUs, label: `${M}x${N}x${K} [${precision}]`, source: "simulated", precision, shape: `${M}x${N}x${K}`, bottleneck: bound }],
+        simulated: [simPt],
         measured: [],
         recommendation: { precision: bound === "memory" ? "NVFP4" : "FP8_E4M3", method: bound === "memory" ? "native_fp4" : "native_fp8", reason: `${bound}-bound: AI=${ai.toFixed(1)} vs critical=${critical.toFixed(0)}`, predicted_speedup: 1.0, memory_bound: bound === "memory", memory_savings_pct: 0 },
       });
+      if (onSimulatedPoints) onSimulatedPoints([simPt]);
     }
     setLoading(false);
   };
@@ -786,6 +1032,7 @@ export default function App() {
   const [fmtTab, setFmtTab] = useState("compare");
   const [selFmt, setSelFmt] = useState("NVFP4");
   const [measuredPoints, setMeasuredPoints] = useState([]);
+  const [simulatedPoints, setSimulatedPoints] = useState([]);
   const [rightTab, setRightTab] = useState("kernel");
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
@@ -830,14 +1077,42 @@ export default function App() {
     }
   };
 
-  const handleChatSend = (queryOverride) => {
+  const [chatLoading, setChatLoading] = useState(false);
+
+  const buildChatContext = useCallback(() => {
+    const lines = [
+      `Hardware: ${hwName}, BW=${hw.bw} GB/s`,
+      `Model: ${modelName}, phase=${phase}, batch=${B}, seq=${S}`,
+      `Precision config: ${cfgName}`,
+    ];
+    if (agg.length > 0) {
+      const totF = agg.reduce((s, o) => s + o.flops, 0);
+      const totB = agg.reduce((s, o) => s + o.bytes, 0);
+      const aggAI = totB > 0 ? totF / totB : 0;
+      const peakT = hw.flops[hwFlopsKey(cfg?.computeAs)] || hw.flops.FP16 || 1;
+      const critical = peakT > 0 && hw.bw > 0 ? (peakT * 1e12) / (hw.bw * 1e9) : 0;
+      const bound = aggAI < critical ? "memory" : "compute";
+      lines.push(`Aggregate: AI=${aggAI.toFixed(2)}, critical≈${critical.toFixed(0)}, bottleneck=${bound}`);
+    }
+    if (measuredPoints.length > 0) lines.push(`Measured points: ${measuredPoints.length} (last: ${measuredPoints[measuredPoints.length-1]?.label || "—"})`);
+    if (simulatedPoints.length > 0) lines.push(`Predicted: ${simulatedPoints[0]?.label || "—"}`);
+    return lines.join("\n");
+  }, [hwName, hw, modelName, phase, B, S, cfgName, agg, cfg, measuredPoints, simulatedPoints]);
+
+  const handleChatSend = async (queryOverride) => {
     const q = (queryOverride ?? chatInput).trim();
     if (!q) return;
-    const res = getOptimizationResponse(q);
-    setChatMessages(m => [...m, { role: "user", text: q }, { role: "assistant", text: res.message }]);
     setChatInput("");
-    setHighlightedSection(res.highlightSection || null);
-    if (res.highlightSection === "kernel_analyzer") setRightTab("kernel");
+    setChatMessages(m => [...m, { role: "user", text: q }]);
+    setChatLoading(true);
+    const ruleRes = getOptimizationResponse(q);
+    const ctx = buildChatContext();
+    const ollamaRes = await askOllama(ctx, q);
+    const text = ollamaRes || ruleRes.message;
+    setChatMessages(m => [...m, { role: "assistant", text }]);
+    setChatLoading(false);
+    setHighlightedSection(ruleRes.highlightSection || null);
+    if (ruleRes.highlightSection === "kernel_analyzer") setRightTab("kernel");
   };
 
   useEffect(() => {
@@ -890,13 +1165,14 @@ export default function App() {
           <input value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleChatSend()}
             placeholder="e.g. How can I speed up decode?"
             style={{ ...sel, flex:1, background:"transparent", border:"1px solid #334155", fontSize:11 }} />
-          <button onClick={handleChatSend} style={{ ...btn(true), flexShrink:0 }}>Send</button>
+          <button onClick={()=>handleChatSend()} disabled={chatLoading} style={{ ...btn(true), flexShrink:0, opacity: chatLoading ? 0.6 : 1 }}>{chatLoading ? "..." : "Send"}</button>
         </div>
         <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:6 }}>
-          {["How can I speed up decode?", "Why is it memory bound?", "What precision for long context?"].map((q,i)=>(
-            <button key={i} onClick={()=>handleChatSend(q)} style={{ ...btn(false), fontSize:9, padding:"2px 6px" }}>{q}</button>
+          {["How can I speed up decode?", "What should I tune?", "Why is it memory bound?", "What precision for long context?"].map((q,i)=>(
+            <button key={i} onClick={()=>handleChatSend(q)} disabled={chatLoading} style={{ ...btn(false), fontSize:9, padding:"2px 6px" }}>{q}</button>
           ))}
         </div>
+        <div style={{ fontSize:8, color:"#64748b" }}>Uses Ollama when available (run: ollama pull llama3.2)</div>
         {chatMessages.length > 0 && (
           <div style={{ maxHeight:120, overflowY:"auto", fontSize:10, lineHeight:1.5 }}>
             {chatMessages.slice(-4).map((m,i)=>(
@@ -984,7 +1260,7 @@ export default function App() {
 
           {/* Roofline */}
           <div style={{ ...P, ...panelHighlight("roofline_plot") }} data-guide-id="roofline_plot">
-            <RooflinePlot ops={agg} hw={hw} pinned={pinned} showBands={showBands} measuredPoints={measuredPoints} />
+            <RooflinePlot ops={agg} hw={hw} pinned={pinned} showBands={showBands} measuredPoints={measuredPoints} simulatedPoints={simulatedPoints} />
           </div>
 
           {/* Op Table */}
@@ -996,19 +1272,34 @@ export default function App() {
 
         {/* ═══ RIGHT: TABS — Kernel Spot Check | Format Reference ═══ */}
         <div style={{ width:280, flexShrink:0 }} data-guide-id="right_sidebar">
-          <div style={{display:"flex",gap:3,marginBottom:8}}>
-            <button onClick={()=>setRightTab("kernel")} style={btn(rightTab==="kernel")}>Kernel Spot Check</button>
-            <button onClick={()=>setRightTab("format")} style={btn(rightTab==="format")}>Format Reference</button>
+          <div style={{display:"flex",gap:3,marginBottom:8,flexWrap:"wrap"}}>
+            <button onClick={()=>setRightTab("kernel")} style={btn(rightTab==="kernel")}>Kernel</button>
+            <button onClick={()=>setRightTab("sweep")} style={btn(rightTab==="sweep")}>GB10 Sweep</button>
+            <button onClick={()=>setRightTab("benchmark")} style={btn(rightTab==="benchmark")}>Benchmark</button>
+            <button onClick={()=>setRightTab("format")} style={btn(rightTab==="format")}>Format</button>
           </div>
+          {rightTab === "benchmark" && (
+            <BenchmarkPanel
+              hwKey={HW_NAME_TO_API_KEY[hwName] || "b10"}
+              onMeasuredPoints={(pts) => setMeasuredPoints(prev => [...prev, ...pts])}
+            />
+          )}
+          {rightTab === "sweep" && (
+            <SweepPanel
+              hwKey={HW_NAME_TO_API_KEY[hwName] || "b10"}
+              onPoints={(sim, meas) => { setSimulatedPoints(sim); setMeasuredPoints(meas); }}
+            />
+          )}
           {rightTab === "kernel" && (
             <div data-guide-id="kernel_analyzer" style={panelHighlight("kernel_analyzer")}>
-              {measuredPoints.length > 0 && (
-                <button onClick={()=>setMeasuredPoints([])} style={{...btn(false),marginBottom:6,width:"100%",fontSize:9}}>Clear measured points</button>
+              {(measuredPoints.length > 0 || simulatedPoints.length > 0) && (
+                <button onClick={()=>{ setMeasuredPoints([]); setSimulatedPoints([]); }} style={{...btn(false),marginBottom:6,width:"100%",fontSize:9}}>Clear predicted & measured</button>
               )}
               <GEMMAnalyzer
                 hw={hw}
                 hwKey={HW_NAME_TO_API_KEY[hwName] || "b10"}
                 onMeasuredPoints={(pts) => setMeasuredPoints(prev => [...prev, ...pts])}
+                onSimulatedPoints={(pts) => setSimulatedPoints(pts)}
               />
             </div>
           )}

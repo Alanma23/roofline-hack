@@ -163,6 +163,17 @@ print(f"Bandwidth: {result.measured_bandwidth_gb_s:.1f} GB/s")
 uvicorn api.server:app --reload --port 8000
 ```
 
+### Single-server deployment (app + API for anyone on the site)
+
+Serve the frontend and API from one server so anyone visiting gets both:
+
+```bash
+cd frontend && npm run build && cd ..
+uvicorn api.server:app --host 0.0.0.0 --port 8000
+```
+
+Then visit `http://localhost:8000` for the app. API at `/api/*`, public (no GPU) API at `/api/public/*`, docs at `/docs`.
+
 Endpoints:
 - `POST /api/analyze` - Analyze single GEMM (theory + measurement)
 - `POST /api/sweep` - Sweep across shapes and precisions

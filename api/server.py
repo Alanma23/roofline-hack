@@ -10,7 +10,18 @@ Endpoints:
   POST /api/tiling      — Tiling analysis for a GEMM shape
   POST /api/recommend   — Auto-quantizer recommendation
 
-Run: uvicorn api.server:app --reload --port 8000
+Public API (for anyone on the site, no GPU/NVML required):
+  GET  /api/public/hardware  — List hardware specs
+  POST /api/public/analyze   — Analyze GEMM (simulation only)
+  POST /api/public/recommend — Quantization recommendation
+
+Run:
+  uvicorn api.server:app --reload --port 8000
+
+Single-server deployment (app + API for anyone on the site):
+  cd frontend && npm run build && cd ..
+  uvicorn api.server:app --host 0.0.0.0 --port 8000
+  → Visit http://localhost:8000 for the app; /api/* for API; /docs for OpenAPI.
 """
 
 import sys
@@ -18,11 +29,13 @@ import asyncio
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parent.parent
+FRONTEND_DIST = ROOT / "frontend" / "dist"
 sys.path.insert(0, str(ROOT))
 
 from src.roofline.calculator_shell import RooflineCalculator, bytes_per_element
@@ -45,6 +58,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Public API router — for anyone on the site (simulation-only, no GPU/NVML)
+public_router = APIRouter(prefix="/api/public", tags=["public"])
 
 # Global NVML monitor (lazy-init)
 _nvml_monitor = None
@@ -89,8 +105,21 @@ def _has_cuda() -> bool:
 
 @app.get("/")
 def root():
-    """Redirect to API docs."""
+    """Serve the app if built, else redirect to API docs."""
+    if FRONTEND_DIST.exists() and (FRONTEND_DIST / "index.html").exists():
+        return FileResponse(FRONTEND_DIST / "index.html")
     return RedirectResponse(url="/docs", status_code=302)
+
+
+def _mount_frontend():
+    """Mount built frontend so anyone visiting gets app + API from one server."""
+    if not FRONTEND_DIST.exists():
+        return
+    assets = FRONTEND_DIST / "assets"
+    if assets.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+
+_mount_frontend()
 
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
@@ -178,21 +207,28 @@ def analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10"):
     )
 
 
+# Quick shapes for faster sweep (decode + prefill + square)
+QUICK_SWEEP_SHAPES = [(1, 4096, 4096), (2048, 4096, 4096), (4096, 4096, 4096)]
+
+
 @app.post("/api/sweep", response_model=SweepResponse)
 def sweep_gemm(
     precisions: Optional[List[str]] = None,
     hardware_key: str = "b10",
     run_measured: bool = False,
+    quick: bool = False,
 ):
-    """Sweep standard GEMM shapes across precisions."""
+    """Sweep GEMM shapes across precisions. Use quick=True for fewer shapes."""
     try:
         hw = get_hardware(hardware_key)
     except KeyError:
         raise HTTPException(404, f"Hardware '{hardware_key}' not found")
 
     from benchmarks.gemm_sweep import run_gemm_sweep, DEFAULT_SHAPES
+    shapes = QUICK_SWEEP_SHAPES if quick else None
     results = run_gemm_sweep(
         hardware=hw,
+        shapes=shapes,
         precisions=precisions,
         run_measured=run_measured,
     )
@@ -247,6 +283,79 @@ def nvml_status():
         gpu_utilization_pct=s.gpu_utilization_pct,
         compute_capability=list(s.compute_capability),
     )
+
+
+BENCHMARK_SHAPES_DEFAULT = "1,4096,4096;2048,4096,4096;4096,4096,4096"
+BENCHMARK_PRECISIONS_DEFAULT = "FP16,FP8_E4M3,NVFP4,INT8"
+
+
+@app.get("/api/benchmark/stream")
+async def benchmark_stream(
+    hardware_key: str = "b10",
+    shapes: str = BENCHMARK_SHAPES_DEFAULT,
+    precisions: str = BENCHMARK_PRECISIONS_DEFAULT,
+):
+    """
+    SSE stream: run benchmarks across shapes × precisions, yield each result as it completes.
+    Saturates GPU with each format for live throughput measurement.
+    """
+    import json
+    try:
+        hw = get_hardware(hardware_key)
+    except KeyError:
+        raise HTTPException(404, f"Hardware '{hardware_key}' not found")
+
+    shape_tuples = []
+    for part in shapes.split(";"):
+        nums = [int(x.strip()) for x in part.split(",") if x.strip()]
+        if len(nums) == 3:
+            shape_tuples.append(tuple(nums))
+    prec_list = [p.strip() for p in precisions.split(",") if p.strip()]
+    if not shape_tuples:
+        shape_tuples = [(1, 4096, 4096), (2048, 4096, 4096), (4096, 4096, 4096)]
+    if not prec_list:
+        prec_list = ["FP16", "FP8_E4M3", "NVFP4", "INT8"]
+
+    async def generate():
+        try:
+            from benchmarks.kernel_shell import GEMMKernel, GEMVKernel, check_cuda
+        except ImportError:
+            yield f"data: {json.dumps({'error': 'Kernel module not available'})}\n\n"
+            return
+        if not check_cuda():
+            yield f"data: {json.dumps({'error': 'CUDA not available'})}\n\n"
+            return
+
+        total = len(shape_tuples) * len(prec_list)
+        done = 0
+
+        for M, N, K in shape_tuples:
+            for prec in prec_list:
+                try:
+                    def run_one():
+                        if M <= 1:
+                            k = GEMVKernel(N, K, prec)
+                        else:
+                            k = GEMMKernel(M, N, K, prec)
+                        return k.benchmark(num_iters=50)
+
+                    meas = await asyncio.to_thread(run_one)
+                    done += 1
+                    evt = {
+                        "shape": f"{M}x{N}x{K}",
+                        "precision": prec,
+                        "time_us": meas["measured_time_us"],
+                        "tflops": meas["measured_tflops"],
+                        "bandwidth_gb_s": meas.get("measured_bandwidth_gb_s"),
+                        "ai": meas["ai"],
+                        "progress": f"{done}/{total}",
+                    }
+                    yield f"data: {json.dumps(evt)}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'error': str(e), 'shape': f'{M}x{N}x{K}', 'precision': prec})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'total': total})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/api/nvml/stream")
@@ -322,6 +431,105 @@ def tiling_analysis(
     """Sweep tile sizes for a GEMM shape."""
     results = sweep_tilings(M, N, K, precision)
     return [TilingResult(**r.to_dict()) for r in results]
+
+
+# ═══════════════════════════════════════════════
+#  PUBLIC API — for anyone on the site (no GPU required)
+# ═══════════════════════════════════════════════
+
+@public_router.get("/hardware", response_model=List[HardwareListItem])
+def public_get_hardware():
+    """List all registered hardware specs (public)."""
+    items = []
+    for key in list_hardware():
+        hw = get_hardware(key)
+        precs = [k for k, v in hw.peak_flops_tflops.items() if v > 0]
+        items.append(HardwareListItem(
+            key=key,
+            name=hw.name,
+            bandwidth_gb_s=hw.peak_bandwidth_gb_s,
+            precisions=precs,
+        ))
+    return items
+
+
+@public_router.post("/analyze", response_model=AnalyzeResponse)
+def public_analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10"):
+    """
+    Analyze a single GEMM: simulation + recommendation + tiling only.
+    No GPU/measurement — safe for anyone on the site.
+    """
+    try:
+        hw = get_hardware(hardware_key)
+    except KeyError:
+        raise HTTPException(404, f"Hardware '{hardware_key}' not found")
+
+    calc = RooflineCalculator(hw)
+    M, N, K = spec.M, spec.N, spec.K
+
+    try:
+        if M <= 1:
+            pred = calc.predict_gemv(N, K, spec.precision)
+        else:
+            pred = calc.predict_gemm(M, N, K, spec.precision)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    sim_point = RooflinePoint(
+        ai=pred["ai"],
+        tflops=pred["predicted_tflops"],
+        time_us=pred["predicted_time_us"],
+        label=f"GEMM {M}x{N}x{K} [{spec.precision}]",
+        source="simulated",
+        precision=spec.precision,
+        shape=f"{M}x{N}x{K}",
+        bottleneck=pred["bottleneck"],
+    )
+
+    rec = recommend_quantization(hardware=hw, M=M, N=N, K=K)
+    rec_result = RecommendationResult(
+        precision=rec.precision,
+        method=rec.method,
+        reason=rec.reason,
+        predicted_speedup=rec.predicted_speedup,
+        memory_bound=rec.memory_bound,
+        memory_savings_pct=rec.memory_savings_pct,
+    )
+
+    tiling = analyze_tiling(M, N, K, spec.tile_m, spec.tile_n, spec.tile_k, spec.precision)
+    tiling_result = TilingResult(**tiling.to_dict())
+
+    return AnalyzeResponse(
+        hardware=hw.name,
+        simulated=[sim_point],
+        measured=[],
+        roofline_lines=_make_roofline_lines(hw),
+        recommendation=rec_result,
+        tiling=tiling_result,
+        nvml=None,
+    )
+
+
+@public_router.post("/recommend", response_model=RecommendationResult)
+def public_recommend(spec: GEMMSpec, hardware_key: str = "b10"):
+    """Auto-quantizer recommendation for a GEMM (public)."""
+    try:
+        hw = get_hardware(hardware_key)
+    except KeyError:
+        raise HTTPException(404, f"Hardware '{hardware_key}' not found")
+
+    rec = recommend_quantization(hardware=hw, M=spec.M, N=spec.N, K=spec.K)
+    return RecommendationResult(
+        precision=rec.precision,
+        method=rec.method,
+        reason=rec.reason,
+        predicted_speedup=rec.predicted_speedup,
+        memory_bound=rec.memory_bound,
+        memory_savings_pct=rec.memory_savings_pct,
+    )
+
+
+app.include_router(public_router)
 
 
 if __name__ == "__main__":
