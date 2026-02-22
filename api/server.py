@@ -45,11 +45,13 @@ from src.roofline.hardware_registry import (
 )
 from src.roofline.auto_quantize import recommend_quantization
 from src.roofline.tiling_model import analyze_tiling, sweep_tilings
+from src.roofline.inference_sizing import compute_inference_sizing, sweep_inference_sizing
 from api.schemas import (
     GEMMSpec, HardwareSpecInput, RooflinePoint, RooflineLine,
     TilingResult, RecommendationResult, AnalyzeResponse, SweepResponse,
     NVMLStatusResponse, HardwareListItem,
     ImportBenchmarkResponse, FlexibleImportRequest, SimplifiedBenchmarkPoint,
+    SizingRequest, SizingResponse, SizingSweepRequest, SizingSweepResponse,
 )
 
 app = FastAPI(title="Blackwell GEMM Roofline Analyzer", version="1.0.0")
@@ -469,6 +471,22 @@ def get_recommendation(spec: GEMMSpec, hardware_key: str = "b10"):
         memory_bound=rec.memory_bound,
         memory_savings_pct=rec.memory_savings_pct,
     )
+
+
+@app.post("/api/workload/sizing", response_model=SizingResponse)
+def workload_sizing(req: SizingRequest):
+    """Network-aware inference workload sizing (TP+PP)."""
+    payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    result = compute_inference_sizing(payload)
+    return SizingResponse(**result)
+
+
+@app.post("/api/workload/sweep", response_model=SizingSweepResponse)
+def workload_sweep(req: SizingSweepRequest):
+    """Sweep TP/PP candidates for workload sizing."""
+    payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    result = sweep_inference_sizing(payload)
+    return SizingSweepResponse(**result)
 
 
 @app.post("/api/import-benchmarks", response_model=ImportBenchmarkResponse)

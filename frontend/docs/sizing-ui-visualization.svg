@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="980" viewBox="0 0 1500 980">
+  <defs>
+    <style>
+      .bg { fill: #060a14; }
+      .panel { fill: #0f172a; stroke: #1e293b; stroke-width: 2; rx: 12; }
+      .panel-soft { fill: #111827; stroke: #334155; stroke-width: 1.5; rx: 8; }
+      .title { fill: #e2e8f0; font-family: "IBM Plex Mono", monospace; font-size: 22px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+      .label { fill: #64748b; font-family: "IBM Plex Mono", monospace; font-size: 10px; text-transform: uppercase; }
+      .value { fill: #e2e8f0; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+      .accent-green { fill: #22c55e; }
+      .accent-orange { fill: #f59e0b; }
+      .accent-red { fill: #ef4444; }
+      .accent-blue { fill: #3b82f6; }
+      .note { fill: #fbbf24; font-family: "IBM Plex Mono", monospace; font-size: 11px; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1500" height="980"/>
+
+  <text class="title" x="36" y="44">Simple Co-Design Sizing (TP + PP + Network)</text>
+  <text class="subtitle" x="36" y="66">New simplified UI in the Sizing tab with infra/data movement visualization</text>
+
+  <!-- Input panel -->
+  <rect class="panel" x="28" y="88" width="1444" height="208" rx="12"/>
+  <text class="value" x="48" y="118">Inputs (Simple Mode)</text>
+
+  <!-- Row 1 controls -->
+  <rect class="panel-soft" x="48" y="132" width="208" height="34" rx="6"/>
+  <text class="label" x="56" y="146">Model</text>
+  <text class="value" x="56" y="160">Llama-3 8B</text>
+
+  <rect class="panel-soft" x="270" y="132" width="208" height="34" rx="6"/>
+  <text class="label" x="278" y="146">Hardware</text>
+  <text class="value" x="278" y="160">GB10 Blackwell</text>
+
+  <rect class="panel-soft" x="492" y="132" width="180" height="34" rx="6"/>
+  <text class="label" x="500" y="146">Phase</text>
+  <text class="value" x="500" y="160">decode</text>
+
+  <rect class="panel-soft" x="686" y="132" width="258" height="34" rx="6"/>
+  <text class="label" x="694" y="146">Precision Profile</text>
+  <text class="value" x="694" y="160">NVFP4 W4A4</text>
+
+  <rect class="panel-soft" x="958" y="132" width="110" height="34" rx="6"/>
+  <text class="label" x="966" y="146">Batch</text>
+  <text class="value" x="966" y="160">1</text>
+
+  <rect class="panel-soft" x="1082" y="132" width="128" height="34" rx="6"/>
+  <text class="label" x="1090" y="146">Seq Len</text>
+  <text class="value" x="1090" y="160">4096</text>
+
+  <!-- Row 2 controls -->
+  <rect class="panel-soft" x="48" y="178" width="124" height="34" rx="6"/>
+  <text class="label" x="56" y="192">TP Shards</text>
+  <text class="value" x="56" y="206">2</text>
+
+  <rect class="panel-soft" x="186" y="178" width="124" height="34" rx="6"/>
+  <text class="label" x="194" y="192">PP Stages</text>
+  <text class="value" x="194" y="206">1</text>
+
+  <rect class="panel-soft" x="324" y="178" width="158" height="34" rx="6"/>
+  <text class="label" x="332" y="192">TP BW (GB/s)</text>
+  <text class="value" x="332" y="206">900</text>
+
+  <rect class="panel-soft" x="496" y="178" width="158" height="34" rx="6"/>
+  <text class="label" x="504" y="192">PP BW (GB/s)</text>
+  <text class="value" x="504" y="206">900</text>
+
+  <rect class="panel-soft" x="668" y="178" width="200" height="34" rx="6"/>
+  <text class="label" x="676" y="192">Advanced Toggle</text>
+  <text class="value" x="676" y="206">[ ] show detailed knobs</text>
+
+  <text class="subtitle" x="48" y="236">Advanced mode reveals memory BW, peak TFLOPS, latencies, overlap, max ASICs, and custom model dimensions.</text>
+
+  <!-- Sharded infra view -->
+  <rect class="panel" x="28" y="312" width="1444" height="190" rx="12"/>
+  <text class="value" x="48" y="340">Sharded Infra View</text>
+  <text class="subtitle" x="48" y="358">Pipeline stages, TP shards per stage, and PP boundary sends</text>
+
+  <rect class="panel-soft" x="64" y="372" width="242" height="98" rx="8"/>
+  <text class="value" x="80" y="398">Stage 1</text>
+  <text class="subtitle" x="80" y="417">layers 1..16</text>
+  <text class="subtitle accent-blue" x="80" y="438">TP shards: 2</text>
+  <text class="subtitle accent-orange" x="80" y="457">All-reduce bytes: 1.72 GB</text>
+
+  <text class="accent-green" x="334" y="425" font-family="IBM Plex Mono, monospace" font-size="20">→</text>
+  <text class="subtitle accent-green" x="360" y="424">PP send</text>
+  <text class="subtitle" x="360" y="444">128.0 MB</text>
+
+  <rect class="panel-soft" x="470" y="372" width="242" height="98" rx="8"/>
+  <text class="value" x="486" y="398">Stage 2</text>
+  <text class="subtitle" x="486" y="417">layers 17..32</text>
+  <text class="subtitle accent-blue" x="486" y="438">TP shards: 2</text>
+  <text class="subtitle accent-orange" x="486" y="457">All-reduce bytes: 1.72 GB</text>
+
+  <!-- Time bars -->
+  <rect class="panel" x="28" y="516" width="1444" height="178" rx="12"/>
+  <text class="value" x="48" y="544">Three-Way Roofline Time Breakdown</text>
+
+  <text class="subtitle" x="48" y="570">Compute roofline</text>
+  <rect x="180" y="560" width="560" height="10" fill="#1e293b" rx="3"/>
+  <rect class="accent-red" x="180" y="560" width="314" height="10" rx="3"/>
+  <text class="subtitle" x="750" y="570">22.1 ms</text>
+
+  <text class="subtitle" x="48" y="600">Memory roofline</text>
+  <rect x="180" y="590" width="560" height="10" fill="#1e293b" rx="3"/>
+  <rect class="accent-blue" x="180" y="590" width="560" height="10" rx="3"/>
+  <text class="subtitle" x="750" y="600">39.3 ms</text>
+
+  <text class="subtitle" x="48" y="630">Network movement</text>
+  <rect x="180" y="620" width="560" height="10" fill="#1e293b" rx="3"/>
+  <rect class="accent-orange" x="180" y="620" width="162" height="10" rx="3"/>
+  <text class="subtitle" x="750" y="630">11.4 ms</text>
+
+  <text class="value" x="48" y="662">Dominant bottleneck: <tspan class="accent-blue">MEMORY</tspan></text>
+  <text class="value" x="330" y="662">End-to-end: <tspan class="accent-green">50.7 ms</tspan></text>
+  <text class="value" x="540" y="662">Throughput: <tspan class="accent-green">80.1 tok/s</tspan></text>
+
+  <!-- Data movement + recommendations -->
+  <rect class="panel" x="28" y="710" width="700" height="244" rx="12"/>
+  <text class="value" x="48" y="738">Data Movement + Guidance</text>
+  <text class="subtitle" x="48" y="764">TP all-reduces: 64  ·  3.44 GB</text>
+  <text class="subtitle" x="48" y="786">PP sends: 1  ·  128.0 MB</text>
+  <text class="note" x="48" y="814">Need memory BW ≥ 390.2 GB/s to remove memory bottleneck</text>
+
+  <text class="value" x="48" y="846">Prefill/Decode compare</text>
+  <text class="subtitle" x="48" y="868">decode: 50.7 ms · memory-bound</text>
+  <text class="subtitle" x="48" y="888">prefill: 722.4 ms · compute-bound</text>
+
+  <!-- Recommendations -->
+  <rect class="panel" x="744" y="710" width="728" height="244" rx="12"/>
+  <text class="value" x="764" y="738">Best TP/PP Picks</text>
+  <text class="label" x="764" y="764">TP</text>
+  <text class="label" x="834" y="764">PP</text>
+  <text class="label" x="904" y="764">ASICs</text>
+  <text class="label" x="1010" y="764">Latency</text>
+  <text class="label" x="1110" y="764">Note</text>
+
+  <text class="subtitle accent-green" x="764" y="792">2</text>
+  <text class="subtitle accent-green" x="834" y="792">1</text>
+  <text class="subtitle accent-green" x="904" y="792">2</text>
+  <text class="subtitle accent-green" x="1010" y="792">50.7 ms</text>
+  <text class="subtitle accent-green" x="1110" y="792">memory-bound</text>
+
+  <text class="subtitle" x="764" y="816">4</text>
+  <text class="subtitle" x="834" y="816">1</text>
+  <text class="subtitle" x="904" y="816">4</text>
+  <text class="subtitle" x="1010" y="816">54.1 ms</text>
+  <text class="subtitle" x="1110" y="816">network pressure ↑</text>
+
+  <text class="subtitle" x="764" y="840">2</text>
+  <text class="subtitle" x="834" y="840">2</text>
+  <text class="subtitle" x="904" y="840">4</text>
+  <text class="subtitle" x="1010" y="840">57.2 ms</text>
+  <text class="subtitle" x="1110" y="840">pipeline overhead</text>
+
+  <text class="subtitle" x="764" y="884">This table is computed from the same workload + hardware settings and ranked by end-to-end latency.</text>
+</svg>
+

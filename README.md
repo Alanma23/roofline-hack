@@ -1,12 +1,19 @@
-# Roofline Performance Toolkit
+# Roofline Sizing Co-Design Toolkit
 
-Predict and optimize transformer inference performance using the roofline model. Automatic quantization recommendations for NVIDIA GB10 Grace Blackwell and other GPUs.
+Frontend-first roofline sizing for multi-ASIC inference co-design.
+Model workload -> TP/PP shard mapping -> compute/memory/network bottleneck -> sizing recommendation.
 
 ## Quick Start
 
 ```bash
 # Install
 pip install -r requirements.txt
+
+# Frontend app (new sizing UI)
+cd frontend
+npm install
+npm run dev   # run in terminal A
+cd ..
 
 # Predict performance (no GPU needed)
 python src/roofline/calculator_shell.py
@@ -20,7 +27,25 @@ print(f'Strategy: {rec.config.strategy_name}, Speedup: {rec.predicted_speedup:.2
 
 # Run tests
 python run_tests.py
+cd frontend && npm run test  # frontend tests
 ```
+
+## Sizing UI (Frontend Anchor)
+
+The default app now launches the roofline sizing co-design workflow:
+
+- `Prefill Page`: prefill-only analysis (single phase shown)
+- `Decode Page`: decode-only analysis (single phase shown)
+- `Prefill + Decode Split`: left/right split view
+- `End-to-End Page`: prefill + decode together, including cross-phase interconnect latency and data movement
+
+Core capabilities:
+
+- TP + PP collective model (per-layer TP all-reduce and PP sends)
+- Three-way bottleneck (`compute`, `memory`, `network`)
+- Pod-aware sizing (`8 ASIC pod` option with exact/up-to constraint mode)
+- Animated node/fabric visualization + bottom multi-node data flow
+- End-to-end mapping with independent prefill and decode hardware picks
 
 ## Why This Matters
 
@@ -49,8 +74,14 @@ if AI > Critical_AI: "compute-bound"  # Large batch prefill
 |----------|-----------|------|-----|-------|------|
 | **GB10** (primary) | 287 GB/s | 62 | 124 | **1000** | 248 TFLOPS |
 | B200 | 8000 GB/s | 180 | 4500 | 9000 | 9000 TFLOPS |
+| AMD Instinct MI325X | 6000 GB/s | 1307 | 2615 | 5230 | 5230 TFLOPS |
+| AMD Instinct MI355X (est model) | 8000 GB/s | 2000 | 4000 | 8000 | 8000 TFLOPS |
+| Cerebras WSE-3 (est model) | 21000000 GB/s | 125000 | 125000 | 250000 | 500000 TFLOPS |
+| Intel Gaudi 3 (est model) | 3700 GB/s | 1835 | 1835 | 3600 | 7340 TFLOPS |
 | H100 | 3350 GB/s | 134 | 1979 | — | 3958 TFLOPS |
 | A100 | 2039 GB/s | 312 | — | — | 624 TFLOPS |
+
+`(est model)` entries are sizing-oriented presets intended for scenario exploration and can be adjusted in the UI.
 
 ## Precision Formats
 
@@ -183,6 +214,8 @@ Endpoints:
 - `POST /api/analyze` - Analyze single GEMM (theory + measurement)
 - `POST /api/sweep` - Sweep across shapes and precisions
 - `POST /api/recommend` - Get quantization recommendation
+- `POST /api/workload/sizing` - TP/PP/network-aware inference sizing result
+- `POST /api/workload/sweep` - Candidate sweep over TP/PP sizing configs
 - `GET /api/nvml/status` - Live GPU monitoring
 - `GET /api/nvml/stream` - Real-time SSE stream
 

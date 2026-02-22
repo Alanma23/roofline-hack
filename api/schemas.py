@@ -131,3 +131,115 @@ class HardwareListItem(BaseModel):
     name: str
     bandwidth_gb_s: float
     precisions: List[str]
+
+
+class WorkloadModelSpec(BaseModel):
+    """Model dimensions for inference sizing."""
+    L: int
+    H: int
+    nh: int
+    nkv: int
+    dh: int
+    dff: int
+    V: int
+    gate: bool = True
+
+
+class WorkloadPrecisionSpec(BaseModel):
+    """Precision assignment for workload sizing."""
+    w: str
+    a: str
+    kv: str
+    computeAs: str
+
+
+class WorkloadSpec(BaseModel):
+    """Workload descriptor (prefill/decode)."""
+    phase: str = "decode"
+    batch: int = 1
+    seq_len: int = 4096
+    prefill_tokens: Optional[int] = None
+    decode_tokens: Optional[int] = None
+    model: WorkloadModelSpec
+    precision: WorkloadPrecisionSpec
+
+
+class SizingHardwareSpec(BaseModel):
+    """Hardware descriptor for sizing model."""
+    name: str
+    peak_tflops: Dict[str, float]
+    mem_bw_gbs: float
+    memory_model: Optional[Dict[str, float | str]] = None
+
+
+class SizingParallelSpec(BaseModel):
+    """Parallelization controls."""
+    tp: int = 1
+    pp: int = 1
+    max_asics: int = 16
+
+
+class SizingNetworkSpec(BaseModel):
+    """Network controls for TP/PP communication."""
+    tp_link_bw_gbs: float = 900.0
+    tp_link_latency_us: float = 3.0
+    pp_link_bw_gbs: float = 900.0
+    pp_link_latency_us: float = 3.0
+    overlap_fraction: float = 0.0
+
+
+class SizingRecommendation(BaseModel):
+    """Recommended TP/PP config."""
+    tp: int
+    pp: int
+    asics: int
+    latency_ms: float
+    bottleneck: str
+    note: str
+
+
+class LayerIOItem(BaseModel):
+    """Per-layer I/O + communication accounting."""
+    layer: int
+    stage: int
+    input_bytes: float
+    output_bytes: float
+    weight_bytes: float
+    tp_sync_bytes: float
+    pp_boundary_send_bytes: float
+
+
+class SizingRequest(BaseModel):
+    """Workload sizing request."""
+    workload: WorkloadSpec
+    hardware: SizingHardwareSpec
+    parallel: SizingParallelSpec
+    network: SizingNetworkSpec
+    target_latency_ms: Optional[float] = None
+
+
+class SizingResponse(BaseModel):
+    """Workload sizing response."""
+    totals: Dict[str, float]
+    collective: Dict[str, float]
+    time: Dict[str, float]
+    bottleneck: str
+    layer_io: List[LayerIOItem]
+    recommendations: List[SizingRecommendation]
+    required_to_debottleneck: Optional[Dict[str, float]] = None
+
+
+class SizingSweepRequest(BaseModel):
+    """Sweep request over TP/PP candidates."""
+    workload: WorkloadSpec
+    hardware: SizingHardwareSpec
+    parallel: SizingParallelSpec
+    network: SizingNetworkSpec
+    tp_candidates: Optional[List[int]] = None
+    pp_candidates: Optional[List[int]] = None
+
+
+class SizingSweepResponse(BaseModel):
+    """Sweep response containing base and candidate configurations."""
+    base: SizingResponse
+    candidates: List[SizingRecommendation]
