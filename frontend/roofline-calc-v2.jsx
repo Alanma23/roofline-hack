@@ -109,6 +109,20 @@ const MODELS = {
   "Llama-2 70B":       { L:80, H:8192, nh:64, nkv:8,  dh:128, dff:28672, V:32000,  gate:true },
   "DeepSeek-V3 est.":  { L:61, H:7168, nh:56, nkv:8,  dh:128, dff:18432, V:129280, gate:true },
   "o1/o3 reasoning":   { L:64, H:6144, nh:48, nkv:8,  dh:128, dff:16384, V:128000, gate:true },
+
+  // MoE Models
+  "DeepSeek-V3 671B (MoE)": {
+    L:61, H:7168, nh:56, nkv:8, dh:128, dff:18432, V:129280, gate:true,
+    moe: { num_experts: 256, experts_per_token: 8, expert_ffn_dim: 1536, capacity_factor: 1.3, expert_parallel: 8, load_imbalance: 0.12 }
+  },
+  "Mixtral 8x7B (MoE)": {
+    L:32, H:4096, nh:32, nkv:8, dh:128, dff:14336, V:32000, gate:true,
+    moe: { num_experts: 8, experts_per_token: 2, expert_ffn_dim: 14336, capacity_factor: 1.25, expert_parallel: 1, load_imbalance: 0.10 }
+  },
+  "Grok-1 314B (MoE)": {
+    L:64, H:6144, nh:48, nkv:8, dh:128, dff:32768, V:128000, gate:true,
+    moe: { num_experts: 8, experts_per_token: 2, expert_ffn_dim: 32768, capacity_factor: 1.5, expert_parallel: 2, load_imbalance: 0.15 }
+  },
 };
 
 // ═══════════════════════════════════════════════
@@ -970,7 +984,58 @@ function ImportBenchmarkPanel({ onMeasuredPoints }) {
   );
 }
 
-function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
+function CustomShapePanel({ onAnalyze }) {
+  const [M, setM] = useState(4096);
+  const [N, setN] = useState(4096);
+  const [K, setK] = useState(4096);
+  const [precision, setPrecision] = useState("FP16");
+
+  const precOptions = ["FP16","BF16","TF32","FP8_E4M3","FP8_E5M2","NVFP4","MXFP4","INT8","INT4"];
+
+  const P = { background:"#0f172a", borderRadius:6, padding:10, border:"1px solid #1e293b", fontSize:10, fontFamily:"monospace" };
+  const inp = { background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:3, padding:"4px 8px", fontSize:10, fontFamily:"monospace", width: "100%" };
+  const btn2 = { background:"#3b82f6", color:"#fff", border:"none", borderRadius:3, padding:"6px 12px", fontSize:11, cursor:"pointer", fontFamily:"monospace" };
+
+  return (
+    <div style={P}>
+      <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>
+        Custom GEMM Shape
+      </div>
+
+      <div style={{marginBottom:8}}>
+        <label style={{fontSize:9,color:"#64748b",display:"block",marginBottom:2}}>M (rows)</label>
+        <input type="number" value={M} onChange={e => setM(parseInt(e.target.value) || 1)} style={inp} min={1} />
+      </div>
+
+      <div style={{marginBottom:8}}>
+        <label style={{fontSize:9,color:"#64748b",display:"block",marginBottom:2}}>N (cols)</label>
+        <input type="number" value={N} onChange={e => setN(parseInt(e.target.value) || 1)} style={inp} min={1} />
+      </div>
+
+      <div style={{marginBottom:8}}>
+        <label style={{fontSize:9,color:"#64748b",display:"block",marginBottom:2}}>K (inner dim)</label>
+        <input type="number" value={K} onChange={e => setK(parseInt(e.target.value) || 1)} style={inp} min={1} />
+      </div>
+
+      <div style={{marginBottom:8}}>
+        <label style={{fontSize:9,color:"#64748b",display:"block",marginBottom:2}}>Precision</label>
+        <select value={precision} onChange={e => setPrecision(e.target.value)} style={inp}>
+          {precOptions.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
+      </div>
+
+      <button onClick={() => onAnalyze(M, N, K, precision)} style={{...btn2, width:"100%"}}>
+        Analyze Custom Shape
+      </button>
+
+      <div style={{marginTop:8,fontSize:8,color:"#64748b"}}>
+        FLOP: {(2*M*N*K/1e9).toFixed(2)} GFLOP
+      </div>
+    </div>
+  );
+}
+
+function GEMMAnalyzer({ hw, hwKey, useEfficiency, onMeasuredPoints, onSimulatedPoints }) {
   const [M, setM] = useState(4096);
   const [N, setN] = useState(4096);
   const [K, setK] = useState(4096);
@@ -997,7 +1062,7 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
       const resp = await fetch(`${API_BASE}/api/analyze?hardware_key=${hwKey}&run_all_precisions=${runAllPrecisions}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ M, N, K, precision }),
+        body: JSON.stringify({ M, N, K, precision, use_efficiency: useEfficiency }),
       });
       if (!resp.ok) throw new Error(`API error: ${resp.status}`);
       const data = await resp.json();
@@ -1181,6 +1246,73 @@ function GEMMAnalyzer({ hw, hwKey, onMeasuredPoints, onSimulatedPoints }) {
 }
 
 // ═══════════════════════════════════════════════
+//  RUN STORAGE (localStorage)
+// ═══════════════════════════════════════════════
+const RunStorage = {
+  save(run) {
+    const runs = this.list();
+    runs[run.run_id] = run;
+    localStorage.setItem('roofline_runs', JSON.stringify(runs));
+  },
+
+  list() {
+    try {
+      const data = localStorage.getItem('roofline_runs');
+      return data ? JSON.parse(data) : {};
+    } catch (e) {
+      console.error('Failed to load runs from localStorage:', e);
+      return {};
+    }
+  },
+
+  load(run_id) {
+    const runs = this.list();
+    return runs[run_id] || null;
+  },
+
+  delete(run_id) {
+    const runs = this.list();
+    delete runs[run_id];
+    localStorage.setItem('roofline_runs', JSON.stringify(runs));
+  },
+
+  export(run_ids) {
+    const runs = this.list();
+    const exported = run_ids.map(id => runs[id]).filter(Boolean);
+    const json = JSON.stringify(exported, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `roofline_runs_${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
+  import(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const imported = JSON.parse(e.target.result);
+          const runs = this.list();
+          let count = 0;
+          imported.forEach(run => {
+            runs[run.run_id] = run;
+            count++;
+          });
+          localStorage.setItem('roofline_runs', JSON.stringify(runs));
+          resolve(count);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.readAsText(file);
+    });
+  },
+};
+
+// ═══════════════════════════════════════════════
 //  MAIN APP
 // ═══════════════════════════════════════════════
 export default function App() {
@@ -1192,6 +1324,7 @@ export default function App() {
   const [B, setB] = useState(1);
   const [S, setS] = useState(4096);
   const [showBands, setShowBands] = useState(true);
+  const [useEfficiency, setUseEfficiency] = useState(true);  // Apply empirical efficiency factors
   const [pinned, setPinned] = useState([]);
   const [nlIn, setNlIn] = useState("");
   const [nlLoading, setNlLoading] = useState(false);
@@ -1205,12 +1338,22 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const [highlightedSection, setHighlightedSection] = useState(null);
   const [cudaAvailable, setCudaAvailable] = useState(null);
+  const [savedRuns, setSavedRuns] = useState([]);
+  const [moeResults, setMoeResults] = useState(null);
+  const [moeLoading, setMoeLoading] = useState(false);
 
   // Check CUDA availability on mount
   useEffect(() => {
     fetch(`${API_BASE}/api/nvml/status`)
       .then(r => setCudaAvailable(r.status === 200))
       .catch(() => setCudaAvailable(false));
+  }, []);
+
+  // Load saved runs on mount
+  useEffect(() => {
+    const runs = Object.values(RunStorage.list());
+    runs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    setSavedRuns(runs);
   }, []);
 
   const applyHw = useCallback(n => { setHwName(n); setHw({...HW_PRESETS[n]}); }, []);
@@ -1227,12 +1370,146 @@ export default function App() {
   const totTimeS = totF / aggPerf;
   const toks = phase === "prefill" ? S : 1;
   const tokS = toks / totTimeS;
+  const flopS = totTimeS > 0 ? totF / totTimeS : 0;  // FLOP/s = total FLOPs / time
   const criticalAI = peakT > 0 && hw.bw > 0 ? (peakT * 1e12) / (hw.bw * 1e9) : 200;
   const bound = aggAI < criticalAI ? "MEMORY" : "COMPUTE";
 
   const pin = () => {
     const lbl = `${hwName.slice(0,6)}·${cfgName.slice(0,10)}·${phase[0]}${S}`;
     setPinned(p => [...p.slice(-3), { label: lbl, ops: agg, hw: {...hw} }]);
+  };
+
+  const saveCurrentRun = () => {
+    const isMoE = model.moe != null;
+    const runName = prompt(
+      "Run name:",
+      `${hwName.slice(0, 15)} ${modelName.slice(0, 20)} ${cfgName.slice(0, 15)} ${phase}`
+    );
+    if (!runName) return;
+
+    const run = {
+      run_id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      name: runName,
+      hardware_key: HW_NAME_TO_API_KEY[hwName] || "b10",
+      workload_type: isMoE ? "moe" : "transformer",
+      config: {
+        hardware: hwName,
+        model: modelName,
+        precision: cfgName,
+        phase,
+        batch: B,
+        seq_len: S,
+        use_efficiency: useEfficiency,
+        ...(isMoE && { moe: model.moe }),
+      },
+      results: {
+        tflops: (flopS / 1e12).toFixed(2),
+        latency_ms: (totTimeS * 1000).toFixed(2),
+        throughput_tok_s: tokS.toFixed(1),
+        bottleneck: bound,
+        roofline_points: agg.map(op => ({
+          ai: op.ai,
+          tflops: attainable(op.ai, peakT, hw.bw) / 1e12,
+          label: op.name,
+        })),
+      },
+      tags: [
+        phase,
+        modelName.split(" ")[0],
+        cfg.w,
+        ...(isMoE ? ["MoE", `${model.moe.num_experts}x${model.moe.experts_per_token}`] : []),
+      ],
+      notes: "",
+    };
+
+    RunStorage.save(run);
+    const runs = Object.values(RunStorage.list());
+    runs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    setSavedRuns(runs);
+    alert(`Run "${runName}" saved!`);
+  };
+
+  const deleteRun = (run_id) => {
+    if (!confirm("Delete this run?")) return;
+    RunStorage.delete(run_id);
+    const runs = Object.values(RunStorage.list());
+    runs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    setSavedRuns(runs);
+  };
+
+  const loadRun = (run) => {
+    if (run.config.hardware && HW_PRESETS[run.config.hardware]) {
+      applyHw(run.config.hardware);
+    }
+    if (run.config.model && MODELS[run.config.model]) {
+      setModelName(run.config.model);
+    }
+    if (run.config.precision && CONFIGS[run.config.precision]) {
+      setCfgName(run.config.precision);
+    }
+    if (run.config.phase) setPhase(run.config.phase);
+    if (run.config.batch) setB(run.config.batch);
+    if (run.config.seq_len) setS(run.config.seq_len);
+    if (run.config.use_efficiency !== undefined) setUseEfficiency(run.config.use_efficiency);
+    alert(`Loaded run: ${run.name}`);
+  };
+
+  const analyzeMoE = async () => {
+    if (!model.moe) {
+      alert("Please select a MoE model (e.g., DeepSeek-V3, Mixtral, Grok)");
+      return;
+    }
+
+    setMoeLoading(true);
+    setMoeResults(null);
+
+    try {
+      const spec = {
+        model: {
+          L: model.L,
+          H: model.H,
+          nh: model.nh,
+          nkv: model.nkv,
+          dh: model.dh,
+          dff: model.dff,
+          V: model.V,
+          gate: model.gate,
+        },
+        moe: model.moe,
+        precision: {
+          w: cfg.w,
+          a: cfg.a,
+          kv: cfg.kv,
+          computeAs: cfg.computeAs,
+        },
+        phase,
+        batch: B,
+        seq_len: S,
+        network_bw_gbs: 900.0,
+        network_latency_us: 3.0,
+        load_imbalance: model.moe.load_imbalance || 0.15,
+      };
+
+      const hwKey = HW_NAME_TO_API_KEY[hwName] || "b10";
+      const resp = await fetch(`${API_BASE}/api/moe/analyze?hardware_key=${hwKey}&use_efficiency=${useEfficiency}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(spec),
+      });
+
+      if (!resp.ok) {
+        throw new Error(`API error: ${resp.status}`);
+      }
+
+      const data = await resp.json();
+      setMoeResults(data);
+    } catch (err) {
+      console.error("MoE analysis failed:", err);
+      alert(`MoE analysis failed: ${err.message}`);
+    } finally {
+      setMoeLoading(false);
+    }
   };
 
   const doNl = async () => {
@@ -1386,6 +1663,9 @@ export default function App() {
             <label style={{fontSize:9,color:"#64748b",display:"flex",alignItems:"center",gap:3,cursor:"pointer",marginTop:2}}>
               <input type="checkbox" checked={showBands} onChange={e=>setShowBands(e.target.checked)} /> Uncertainty bands
             </label>
+            <label style={{fontSize:9,color:"#64748b",display:"flex",alignItems:"center",gap:3,cursor:"pointer",marginTop:2}}>
+              <input type="checkbox" checked={useEfficiency} onChange={e=>setUseEfficiency(e.target.checked)} /> Realistic roofline (efficiency factors)
+            </label>
           </div>
 
           {/* Workload */}
@@ -1418,6 +1698,37 @@ export default function App() {
             </div>)}
           </div>
 
+          {/* Save Run */}
+          <div style={P}>
+            <span style={L}>Save Run</span>
+            <button onClick={saveCurrentRun} style={{...btn(false),width:"100%",marginBottom:6}}>💾 Save current configuration</button>
+            {savedRuns.length > 0 && (
+              <div style={{maxHeight:200,overflowY:"auto"}}>
+                {savedRuns.slice(0, 5).map(run => (
+                  <div key={run.run_id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:8,color:"#94a3b8",padding:"3px 0",borderBottom:"1px solid #1e293b"}}>
+                    <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={() => loadRun(run)}>
+                      <div style={{fontWeight:500,color:"#cbd5e1",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{run.name}</div>
+                      <div style={{color:"#64748b",fontSize:7}}>
+                        {run.tags.slice(0,3).join(" · ")} · {new Date(run.timestamp).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <button onClick={() => deleteRun(run.run_id)} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:9,padding:"0 4px"}}>✕</button>
+                  </div>
+                ))}
+                {savedRuns.length > 5 && (
+                  <div style={{fontSize:7,color:"#475569",textAlign:"center",marginTop:4}}>
+                    +{savedRuns.length - 5} more runs
+                  </div>
+                )}
+              </div>
+            )}
+            {savedRuns.length === 0 && (
+              <div style={{fontSize:8,color:"#475569",fontStyle:"italic",marginTop:4}}>
+                No saved runs yet. Save your current configuration to compare later.
+              </div>
+            )}
+          </div>
+
           {/* What to do — quantization recommendation */}
           <div style={{ ...P, ...panelHighlight("what_to_do") }} data-guide-id="what_to_do">
             <span style={L}>What to do</span>
@@ -1434,7 +1745,7 @@ export default function App() {
               {l:"Total", v:(totF/1e12).toFixed(2), u:" TFLOP"},
               {l:"Bytes", v:totB2>1e9?(totB2/1e9).toFixed(2)+" GB":(totB2/1e6).toFixed(1)+" MB"},
               {l:"Est Time", v:totTimeS<.001?(totTimeS*1e6).toFixed(0)+"μs":totTimeS<1?(totTimeS*1e3).toFixed(1)+"ms":totTimeS.toFixed(2)+"s"},
-              {l:"Throughput", v:tokS>1e6?(tokS/1e6).toFixed(1)+"M":tokS>1e3?(tokS/1e3).toFixed(1)+"K":tokS.toFixed(1), u:" tok/s"},
+              {l:"Throughput", v:flopS>1e15?(flopS/1e15).toFixed(1)+"P":flopS>1e12?(flopS/1e12).toFixed(1)+"T":flopS>1e9?(flopS/1e9).toFixed(1)+"G":(flopS/1e6).toFixed(1)+"M", u:" FLOP/s"},
               {l:"Bound", v:bound, c:bound==="COMPUTE"?"#f87171":"#60a5fa"},
               {l:"W bits/elem", v:effectiveBitsPerElement(cfg.w).toFixed(2)},
               {l:"KV bits/elem", v:effectiveBitsPerElement(cfg.kv).toFixed(2)},
@@ -1490,6 +1801,7 @@ export default function App() {
               <GEMMAnalyzer
                 hw={hw}
                 hwKey={HW_NAME_TO_API_KEY[hwName] || "b10"}
+                useEfficiency={useEfficiency}
                 onMeasuredPoints={(pts) => setMeasuredPoints(prev => [...prev, ...pts])}
                 onSimulatedPoints={(pts) => setSimulatedPoints(pts)}
               />

@@ -182,6 +182,7 @@ export function computeSizing(request, options = {}) {
       kernel_ms: kernelS * 1e3,
       end_to_end_ms: endToEndS * 1e3,
       tokens_per_s: endToEndS > 0 ? workloadData.token_count / endToEndS : 0,
+      flops_per_s: endToEndS > 0 ? workloadData.totals.flops / endToEndS : 0,
     },
     bottleneck,
     layer_io: layerIO,

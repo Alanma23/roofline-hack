@@ -36,6 +36,7 @@ BLACKWELL_B200 = HardwareSpec(
 # GB10 Grace Blackwell (ASUS Ascent GX10) — measured specs from ServeTheHome
 # 128GB LPDDR5X @ 9400MT/s, 256-bit bus = 273-301 GB/s bandwidth
 # 31 TFLOPS FP32, 1000 TFLOPS FP4 (dense), 1 PFLOP FP4 (sparse)
+# FP8 updated to 164 TFLOPS based on empirical benchmarks (measured 164.8 TFLOPS)
 BLACKWELL_B10 = HardwareSpec(
     name="NVIDIA GB10 Grace Blackwell (GX10)",
     peak_bandwidth_gb_s=287.0,  # LPDDR5X 9400MT/s, 256-bit
@@ -45,13 +46,37 @@ BLACKWELL_B10 = HardwareSpec(
         "TF32": 62.0,  # ~2×FP32 (tensor cores)
         "BF16": 62.0,  # ~2×FP32
         "FP16": 62.0,  # ~2×FP32
-        "FP8_E4M3": 124.0,  # ~2×FP16
-        "FP8_E5M2": 124.0,  # ~2×FP16
+        "FP8_E4M3": 164.0,  # Updated from 124.0 based on empirical benchmarks
+        "FP8_E5M2": 164.0,  # Updated from 124.0
         "NVFP4": 1000.0,  # measured dense FP4
         "MXFP4": 1000.0,  # similar to NVFP4
-        "MXFP8": 124.0,  # similar to FP8
+        "MXFP8": 164.0,  # Updated from 124.0, similar to FP8
         "INT8": 124.0,  # ~2×FP16
         "INT4": 248.0,  # ~2×INT8
+    },
+    kernel_efficiency={
+        # Empirical efficiency factors from SIMULATION_VS_ACTUAL_ANALYSIS.md
+        # Format: {kernel_type: {precision: efficiency_factor}}
+        # GEMV is bandwidth-bound (memory-limited kernels)
+        "gemv": {
+            "FP16": 0.575,    # 57.5% bandwidth efficiency (measured 203μs vs 117μs ideal)
+            "BF16": 0.585,    # Similar to FP16
+            "TF32": 0.43,     # Lower efficiency for TF32
+            "FP8_E4M3": 1.68, # Exceeds spec due to memory optimizations (measured 69μs vs 116μs)
+            "FP8_E5M2": 1.68, # Same as FP8_E4M3
+            "MXFP8": 1.68,    # Same as FP8
+            "INT8": 0.14,     # No native tensor core GEMV path (measured 836μs vs 117μs)
+        },
+        # GEMM is compute-bound (tile efficiency)
+        "gemm": {
+            "FP16": 0.155,    # 15.5% of peak (measured 14339μs vs 2216μs ideal)
+            "BF16": 0.155,    # Similar to FP16
+            "TF32": 0.602,    # 60.2% - excellent tensor core utilization
+            "FP8_E4M3": 1.0,  # Now matches 164 TFLOPS spec (measured 834μs vs 834μs)
+            "FP8_E5M2": 1.0,  # Same as FP8_E4M3
+            "MXFP8": 1.0,     # Same as FP8
+            "INT8": 0.435,    # Moderate efficiency (measured 1917μs vs 834μs)
+        },
     },
 )
 

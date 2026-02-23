@@ -198,15 +198,14 @@ When "Run all precisions" is checked:
 
 **Use case:** Compare how different precisions perform for the same workload.
 
-See `SSH_TUNNEL_SETUP.md` for detailed setup and troubleshooting.
+See `B10_REMOTE_GUIDE.md` for detailed setup and troubleshooting.
 
 ---
 
 ## 📚 Reference
 
 - **Theory & formulas:** `THEORY.md` (roofline fundamentals + precision catalog)
-- **Frontend reference:** `frontend/roofline-calc-v2.jsx` (lines 148-208)
-- **SSH tunnel setup:** `SSH_TUNNEL_SETUP.md` (remote benchmarking guide)
+- **SSH tunnel setup:** `B10_REMOTE_GUIDE.md` (remote benchmarking guide)
 
 ---
 

@@ -52,6 +52,10 @@ from api.schemas import (
     NVMLStatusResponse, HardwareListItem,
     ImportBenchmarkResponse, FlexibleImportRequest, SimplifiedBenchmarkPoint,
     SizingRequest, SizingResponse, SizingSweepRequest, SizingSweepResponse,
+    RunMetadata, RunListItem, SaveRunRequest, CompareRunsRequest, CompareRunsResponse,
+    ExportRunsRequest, ExportRunsResponse, ImportRunsRequest, ImportRunsResponse,
+    ComparisonMetric,
+    MoEConfig, MoEWorkloadSpec, MoEAnalysisResult,
 )
 
 app = FastAPI(title="Blackwell GEMM Roofline Analyzer", version="1.0.0")
@@ -136,7 +140,7 @@ def analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10", run_all_precisions: 
     except KeyError:
         raise HTTPException(404, f"Hardware '{hardware_key}' not found")
 
-    calc = RooflineCalculator(hw)
+    calc = RooflineCalculator(hw, use_efficiency=spec.use_efficiency)
     M, N, K = spec.M, spec.N, spec.K
 
     # Simulated prediction
@@ -589,7 +593,7 @@ def public_analyze_gemm(spec: GEMMSpec, hardware_key: str = "b10"):
     except KeyError:
         raise HTTPException(404, f"Hardware '{hardware_key}' not found")
 
-    calc = RooflineCalculator(hw)
+    calc = RooflineCalculator(hw, use_efficiency=spec.use_efficiency)
     M, N, K = spec.M, spec.N, spec.K
 
     try:
@@ -658,6 +662,183 @@ def public_recommend(spec: GEMMSpec, hardware_key: str = "b10"):
 def public_import_benchmarks(req: FlexibleImportRequest):
     """Import externally-collected benchmark data (public, no GPU required)."""
     return import_benchmarks(req)
+
+
+# ═══════════════════════════════════════════════
+#  RUN TRACKING ENDPOINTS
+# ═══════════════════════════════════════════════
+
+# In-memory run storage (migrate to database later)
+_run_storage: Dict[str, RunMetadata] = {}
+
+
+@app.post("/api/runs/save")
+def save_run(req: SaveRunRequest):
+    """Save a run configuration and results."""
+    run_id = req.metadata.run_id
+    _run_storage[run_id] = req.metadata
+    return {"status": "saved", "run_id": run_id}
+
+
+@app.get("/api/runs/list", response_model=List[RunListItem])
+def list_runs(hardware_key: Optional[str] = None, workload_type: Optional[str] = None):
+    """List saved runs with optional filters."""
+    runs = list(_run_storage.values())
+
+    # Apply filters
+    if hardware_key:
+        runs = [r for r in runs if r.hardware_key == hardware_key]
+    if workload_type:
+        runs = [r for r in runs if r.workload_type == workload_type]
+
+    # Sort by timestamp (most recent first)
+    runs.sort(key=lambda r: r.timestamp, reverse=True)
+
+    # Build preview summaries
+    items = []
+    for r in runs:
+        preview = {
+            "tflops": r.results.get("tflops", 0),
+            "latency_ms": r.results.get("latency_ms", 0),
+            "bottleneck": r.results.get("bottleneck", "unknown"),
+        }
+        items.append(RunListItem(
+            run_id=r.run_id,
+            timestamp=r.timestamp,
+            name=r.name,
+            hardware_key=r.hardware_key,
+            workload_type=r.workload_type,
+            tags=r.tags,
+            preview=preview,
+        ))
+    return items
+
+
+@app.get("/api/runs/{run_id}", response_model=RunMetadata)
+def load_run(run_id: str):
+    """Load full run details."""
+    if run_id not in _run_storage:
+        raise HTTPException(404, f"Run '{run_id}' not found")
+    return _run_storage[run_id]
+
+
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: str):
+    """Delete a run."""
+    if run_id not in _run_storage:
+        raise HTTPException(404, f"Run '{run_id}' not found")
+    del _run_storage[run_id]
+    return {"status": "deleted", "run_id": run_id}
+
+
+@app.post("/api/runs/compare", response_model=CompareRunsResponse)
+def compare_runs(req: CompareRunsRequest):
+    """Compare multiple runs side-by-side."""
+    runs = []
+    for run_id in req.run_ids:
+        if run_id not in _run_storage:
+            raise HTTPException(404, f"Run '{run_id}' not found")
+        runs.append(_run_storage[run_id])
+
+    if not runs:
+        return CompareRunsResponse(runs=[], comparison_table=[])
+
+    # Build comparison table
+    metrics = ["tflops", "latency_ms", "throughput_tok_s"]
+    comparison_table = []
+
+    baseline = runs[0]
+    for metric in metrics:
+        baseline_val = baseline.results.get(metric, 0)
+        values = {}
+        deltas = {}
+
+        for r in runs:
+            val = r.results.get(metric, 0)
+            values[r.run_id] = val
+            if baseline_val > 0:
+                deltas[r.run_id] = ((val - baseline_val) / baseline_val) * 100
+            else:
+                deltas[r.run_id] = 0.0
+
+        comparison_table.append(ComparisonMetric(
+            metric=metric,
+            values=values,
+            deltas=deltas,
+        ))
+
+    return CompareRunsResponse(runs=runs, comparison_table=comparison_table)
+
+
+@app.post("/api/runs/export", response_model=ExportRunsResponse)
+def export_runs(req: ExportRunsRequest):
+    """Export runs as JSON for sharing."""
+    runs = []
+    for run_id in req.run_ids:
+        if run_id not in _run_storage:
+            raise HTTPException(404, f"Run '{run_id}' not found")
+        runs.append(_run_storage[run_id])
+    return ExportRunsResponse(runs=runs)
+
+
+@app.post("/api/runs/import", response_model=ImportRunsResponse)
+def import_runs(req: ImportRunsRequest):
+    """Import runs from JSON."""
+    imported = 0
+    errors = []
+
+    for run in req.runs:
+        try:
+            _run_storage[run.run_id] = run
+            imported += 1
+        except Exception as e:
+            errors.append(f"Run {run.run_id}: {str(e)}")
+
+    return ImportRunsResponse(imported=imported, errors=errors)
+
+
+# ═══════════════════════════════════════════════
+#  MOE ENDPOINTS
+# ═══════════════════════════════════════════════
+
+@app.post("/api/moe/analyze", response_model=MoEAnalysisResult)
+def analyze_moe(spec: MoEWorkloadSpec, hardware_key: str = "b10", use_efficiency: bool = True):
+    """
+    Analyze MoE layer performance: router + experts + all-to-all communication.
+
+    Args:
+        spec: MoE workload specification (model, moe config, precision, batch, seq_len)
+        hardware_key: Hardware key ("b10", "b200", "h100", etc.)
+        use_efficiency: Apply empirical efficiency factors (realistic vs ideal)
+
+    Returns:
+        MoE performance breakdown with bottleneck analysis and recommendations
+    """
+    try:
+        hw = get_hardware(hardware_key)
+    except KeyError:
+        raise HTTPException(404, f"Hardware '{hardware_key}' not found")
+
+    from src.roofline.moe_model import MoECalculator
+
+    calc = MoECalculator(hw, use_efficiency=use_efficiency)
+
+    result = calc.predict_moe_layer(
+        batch=spec.batch,
+        seq_len=spec.seq_len,
+        hidden_dim=spec.model.H,
+        num_experts=spec.moe.num_experts,
+        experts_per_token=spec.moe.experts_per_token,
+        expert_ffn_dim=spec.moe.expert_ffn_dim,
+        precision=spec.precision.w,
+        capacity_factor=spec.moe.capacity_factor,
+        expert_parallel=spec.moe.expert_parallel,
+        load_imbalance=spec.load_imbalance,
+        network_bw_gbs=spec.network_bw_gbs,
+        network_latency_us=spec.network_latency_us,
+    )
+
+    return MoEAnalysisResult(**result)
 
 
 app.include_router(public_router)

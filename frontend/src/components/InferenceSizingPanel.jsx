@@ -286,6 +286,171 @@ function PodVisualizer({ podSize, tp, pp, bottleneck }) {
   );
 }
 
+function RooflineChart({ ai, achievedTflops, memBandwidthGBs, peakTflops, bottleneck, label }) {
+  const width = 400;
+  const height = 300;
+  const margin = { top: 20, right: 20, bottom: 40, left: 60 };
+  const chartWidth = width - margin.left - margin.right;
+  const chartHeight = height - margin.top - margin.bottom;
+
+  // Log scale ranges
+  const aiMin = 0.1;
+  const aiMax = 100;
+  const flopsMin = 0.01; // TFLOP/s
+  const flopsMax = Math.max(peakTflops * 2, achievedTflops * 3, 100);
+
+  // Log scale helpers
+  const xScale = (ai_val) => {
+    const logMin = Math.log10(aiMin);
+    const logMax = Math.log10(aiMax);
+    const logVal = Math.log10(Math.max(aiMin, Math.min(aiMax, ai_val)));
+    return ((logVal - logMin) / (logMax - logMin)) * chartWidth;
+  };
+
+  const yScale = (tflops) => {
+    const logMin = Math.log10(flopsMin);
+    const logMax = Math.log10(flopsMax);
+    const logVal = Math.log10(Math.max(flopsMin, Math.min(flopsMax, tflops)));
+    return chartHeight - ((logVal - logMin) / (logMax - logMin)) * chartHeight;
+  };
+
+  // Critical AI (where memory line meets compute ceiling)
+  const criticalAI = peakTflops / (memBandwidthGBs / 1000); // Convert GB/s to TB/s
+
+  // Memory bandwidth line (y = bandwidth * x)
+  const memBwTBs = memBandwidthGBs / 1000; // Convert to TB/s
+  const memLine = [
+    { ai: aiMin, tflops: memBwTBs * aiMin },
+    { ai: criticalAI, tflops: memBwTBs * criticalAI },
+  ].filter((p) => p.tflops >= flopsMin && p.tflops <= flopsMax);
+
+  const memPathD = memLine.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p.ai)} ${yScale(p.tflops)}`).join(' ');
+
+  // Compute ceiling line (horizontal)
+  const computeLine = [
+    { ai: Math.max(aiMin, criticalAI), tflops: peakTflops },
+    { ai: aiMax, tflops: peakTflops },
+  ];
+
+  const computePathD = computeLine.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p.ai)} ${yScale(p.tflops)}`).join(' ');
+
+  // Workload point
+  const pointX = xScale(ai);
+  const pointY = yScale(achievedTflops);
+
+  const pointColor = bottleneck === "memory" ? "#3b82f6" : bottleneck === "compute" ? "#ef4444" : "#f59e0b";
+
+  return (
+    <svg width={width} height={height} style={{ background: "#0f172a", borderRadius: 6 }}>
+      <g transform={`translate(${margin.left},${margin.top})`}>
+        {/* Grid lines */}
+        {[0.1, 1, 10, 100].map((ai_val) => (
+          <line
+            key={`grid-x-${ai_val}`}
+            x1={xScale(ai_val)}
+            y1={0}
+            x2={xScale(ai_val)}
+            y2={chartHeight}
+            stroke="#1e293b"
+            strokeWidth={0.5}
+          />
+        ))}
+        {[0.01, 0.1, 1, 10, 100, 1000].map((tflops) => (
+          <line
+            key={`grid-y-${tflops}`}
+            x1={0}
+            y1={yScale(tflops)}
+            x2={chartWidth}
+            y2={yScale(tflops)}
+            stroke="#1e293b"
+            strokeWidth={0.5}
+          />
+        ))}
+
+        {/* Memory bandwidth line (diagonal) */}
+        <path d={memPathD} fill="none" stroke="#3b82f6" strokeWidth={2} strokeDasharray="4,2" />
+
+        {/* Compute ceiling line (horizontal) */}
+        <path d={computePathD} fill="none" stroke="#ef4444" strokeWidth={2} />
+
+        {/* Critical AI indicator */}
+        <line
+          x1={xScale(criticalAI)}
+          y1={0}
+          x2={xScale(criticalAI)}
+          y2={chartHeight}
+          stroke="#94a3b8"
+          strokeWidth={1}
+          strokeDasharray="2,2"
+          opacity={0.3}
+        />
+
+        {/* Workload point */}
+        <circle cx={pointX} cy={pointY} r={6} fill={pointColor} stroke="#0f172a" strokeWidth={2} opacity={0.9} />
+
+        {/* Axes */}
+        <line x1={0} y1={chartHeight} x2={chartWidth} y2={chartHeight} stroke="#64748b" strokeWidth={1} />
+        <line x1={0} y1={0} x2={0} y2={chartHeight} stroke="#64748b" strokeWidth={1} />
+
+        {/* Axis labels */}
+        <text x={chartWidth / 2} y={chartHeight + 30} fill="#94a3b8" fontSize={9} textAnchor="middle" fontFamily="monospace">
+          Arithmetic Intensity (FLOP/byte)
+        </text>
+        <text
+          x={-chartHeight / 2}
+          y={-45}
+          fill="#94a3b8"
+          fontSize={9}
+          textAnchor="middle"
+          fontFamily="monospace"
+          transform={`rotate(-90, ${-chartHeight / 2}, -45)`}
+        >
+          Performance (TFLOP/s)
+        </text>
+
+        {/* Tick labels */}
+        {[0.1, 1, 10, 100].map((ai_val) => (
+          <text
+            key={`tick-x-${ai_val}`}
+            x={xScale(ai_val)}
+            y={chartHeight + 15}
+            fill="#64748b"
+            fontSize={7}
+            textAnchor="middle"
+            fontFamily="monospace"
+          >
+            {ai_val}
+          </text>
+        ))}
+        {[0.01, 0.1, 1, 10, 100].filter(t => t >= flopsMin && t <= flopsMax).map((tflops) => (
+          <text
+            key={`tick-y-${tflops}`}
+            x={-8}
+            y={yScale(tflops) + 3}
+            fill="#64748b"
+            fontSize={7}
+            textAnchor="end"
+            fontFamily="monospace"
+          >
+            {tflops >= 1 ? tflops.toFixed(0) : tflops.toFixed(2)}
+          </text>
+        ))}
+
+        {/* Legend */}
+        <text x={pointX} y={pointY - 12} fill={pointColor} fontSize={8} textAnchor="middle" fontFamily="monospace" fontWeight={600}>
+          {label}
+        </text>
+        <text x={chartWidth - 5} y={yScale(peakTflops) - 5} fill="#ef4444" fontSize={7} textAnchor="end" fontFamily="monospace">
+          Peak: {peakTflops.toFixed(0)}T
+        </text>
+        <text x={5} y={15} fill="#3b82f6" fontSize={7} fontFamily="monospace">
+          BW: {memBandwidthGBs.toFixed(0)} GB/s
+        </text>
+      </g>
+    </svg>
+  );
+}
+
 export default function InferenceSizingPanel({
   models = {},
   configs = {},
@@ -358,6 +523,14 @@ export default function InferenceSizingPanel({
   const [tpLinkLatUs, setTpLinkLatUs] = useState(3);
   const [ppLinkLatUs, setPpLinkLatUs] = useState(3);
   const [overlap, setOverlap] = useState(0);
+
+  // Multi-node network state
+  const [useMultiNode, setUseMultiNode] = useState(false);
+  const [gpusPerNode, setGpusPerNode] = useState(8);
+  const [intraBw, setIntraBw] = useState(900);
+  const [intraLat, setIntraLat] = useState(3);
+  const [interBw, setInterBw] = useState(400);
+  const [interLat, setInterLat] = useState(10);
 
   const [e2ePrefillHardware, setE2ePrefillHardware] = useState(
     hardwareNames.includes(currentHardwareName) ? currentHardwareName : fallbackHardwareName,
@@ -461,7 +634,14 @@ export default function InferenceSizingPanel({
       pp: intValue(pp, 1),
       max_asics: maxAsicsEffective,
     },
-    network: {
+    network: useMultiNode ? {
+      gpus_per_node: intValue(gpusPerNode, 8),
+      intra_node_bw_gbs: numberValue(intraBw, 900, 0.1),
+      intra_node_latency_us: numberValue(intraLat, 3, 0),
+      inter_node_bw_gbs: numberValue(interBw, 400, 0.1),
+      inter_node_latency_us: numberValue(interLat, 10, 0),
+      overlap_fraction: Math.max(0, Math.min(1, numberValue(overlap, 0, 0))),
+    } : {
       tp_link_bw_gbs: numberValue(tpLinkBw, 900, 0.1),
       tp_link_latency_us: numberValue(tpLinkLatUs, 3, 0),
       pp_link_bw_gbs: numberValue(ppLinkBw, tpLinkBw, 0.1),
@@ -473,6 +653,7 @@ export default function InferenceSizingPanel({
     hardwareChoice, hardwareFlops, memBw,
     memoryMode, onchipBw, offchipBw, onchipHitRate,
     tp, pp, maxAsicsEffective, tpLinkBw, ppLinkBw, tpLinkLatUs, ppLinkLatUs, overlap,
+    useMultiNode, gpusPerNode, intraBw, intraLat, interBw, interLat,
   ]);
 
   const sizingOptions = useMemo(() => ({ bytesPerElement, hwFlopsKey }), [bytesPerElement, hwFlopsKey]);
@@ -927,11 +1108,25 @@ export default function InferenceSizingPanel({
             <TimeBar label="Memory roofline time" value={result.time.memory_ms} maxValue={maxBar} color="#3b82f6" />
             <TimeBar label="Network movement time" value={result.time.network_ms} maxValue={maxBar} color="#f59e0b" />
             <div style={{ fontSize: 9, color: "#94a3b8", marginTop: 4 }}>
-              End-to-end: <span style={{ color: "#22c55e" }}>{fmtMs(result.time.end_to_end_ms)}</span> · Throughput: {result.time.tokens_per_s.toFixed(1)} tok/s
+              End-to-end: <span style={{ color: "#22c55e" }}>{fmtMs(result.time.end_to_end_ms)}</span> · Throughput: {result.time.flops_per_s ? result.time.flops_per_s.toExponential(2) : '0'} FLOP/s ({result.time.tokens_per_s.toFixed(1)} tok/s)
             </div>
             <div style={{ fontSize: 8, color: "#64748b", marginTop: 2 }}>
               Active context: {request.workload.seq_len} tokens ({request.workload.phase})
             </div>
+          </div>
+
+          <div style={panel}>
+            <div style={{ fontSize: 9, color: "#475569", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 6 }}>
+              Roofline Visualization
+            </div>
+            <RooflineChart
+              ai={result.totals.ai}
+              achievedTflops={result.time.flops_per_s ? result.time.flops_per_s / 1e12 : 0}
+              memBandwidthGBs={memBw}
+              peakTflops={hardwareFlops[computeKey] || 62}
+              bottleneck={result.bottleneck}
+              label={`TP${request.parallel.tp} PP${request.parallel.pp}`}
+            />
           </div>
 
           <div style={panel}>

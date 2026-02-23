@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 from .calculator_shell import bytes_per_element
+from .roofline_math import critical_batch_size, inter_chip_critical_dim
 
 
 def _pos_int(value, fallback: int) -> int:
@@ -107,6 +108,128 @@ def _p2p_time_s(tensor_bytes: float, bw_gbs: float, lat_us: float) -> Tuple[floa
     lat_s = max(0.0, lat_us) * 1e-6
     bw_s = bytes_sent / (_pos_float(bw_gbs, 1.0) * 1e9)
     return lat_s + bw_s, lat_s, bw_s
+
+
+def _is_cross_node(rank_a: int, rank_b: int, gpus_per_node: int) -> bool:
+    """Check if two ranks are on different nodes."""
+    return rank_a // gpus_per_node != rank_b // gpus_per_node
+
+
+def _ring_ar_bytes_multinode(
+    tensor_bytes: float, tp: int, gpus_per_node: int
+) -> Tuple[float, float]:
+    """Calculate intra-node and inter-node bytes for ring all-reduce.
+
+    Returns: (intra_node_bytes, inter_node_bytes)
+    """
+    total_bytes = 2.0 * (tp - 1) / tp * tensor_bytes
+
+    if tp <= gpus_per_node:
+        # All communication is intra-node
+        return (total_bytes, 0.0)
+
+    # Mixed: some intra-node, some inter-node
+    # Simplification: assume ring crosses node boundaries proportionally
+    num_nodes = (tp + gpus_per_node - 1) // gpus_per_node
+    cross_node_hops = num_nodes - 1  # At least (num_nodes - 1) inter-node hops
+    inter_node_ratio = cross_node_hops / (tp - 1) if tp > 1 else 0.0
+
+    inter_node_bytes = total_bytes * inter_node_ratio
+    intra_node_bytes = total_bytes * (1 - inter_node_ratio)
+
+    return (intra_node_bytes, inter_node_bytes)
+
+
+def _ring_ar_time_multinode(
+    tensor_bytes: float, tp: int,
+    intra_bw_gbs: float, intra_lat_us: float,
+    inter_bw_gbs: float, inter_lat_us: float,
+    gpus_per_node: int
+) -> Tuple[float, float, float, float, float]:
+    """Ring all-reduce time with multi-node topology awareness.
+
+    Returns: (total_time_s, total_bytes, lat_s, intra_bw_s, inter_bw_s)
+    """
+    intra_bytes, inter_bytes = _ring_ar_bytes_multinode(tensor_bytes, tp, gpus_per_node)
+
+    # Latency: each step in ring has either intra or inter-node latency
+    num_steps = tp - 1
+    num_nodes = (tp + gpus_per_node - 1) // gpus_per_node
+    cross_node_steps = min(num_steps, num_nodes - 1)
+    intra_steps = num_steps - cross_node_steps
+
+    lat_s = (intra_steps * intra_lat_us + cross_node_steps * inter_lat_us) * 1e-6
+
+    # Bandwidth: intra and inter transfers can overlap in pipelined ring
+    # Conservative model: serialize them (worst case)
+    intra_bw_s = 0.0
+    inter_bw_s = 0.0
+    if intra_bytes > 0 and intra_bw_gbs > 0:
+        intra_bw_s = intra_bytes / (intra_bw_gbs * 1e9)
+    if inter_bytes > 0 and inter_bw_gbs > 0:
+        inter_bw_s = inter_bytes / (inter_bw_gbs * 1e9)
+
+    total_bytes = intra_bytes + inter_bytes
+    total_time = lat_s + intra_bw_s + inter_bw_s
+
+    return total_time, total_bytes, lat_s, intra_bw_s, inter_bw_s
+
+
+def _allgather_time_s(
+    tensor_bytes: float,
+    bandwidth_gb_s: float,
+    latency_us: float = 0.0,
+    latency_bound: bool = False
+) -> float:
+    """
+    AllGather communication time.
+
+    From JAX scaling-book:
+    T_comm = V / W_ici (throughput-bound)
+    T_comm = T_min × |chunks|/2 (latency-bound, for V < ~45kB)
+
+    Args:
+        tensor_bytes: Size of tensor being gathered
+        bandwidth_gb_s: Network bandwidth
+        latency_us: Network latency (for latency-bound regime)
+        latency_bound: If True, use latency formula instead
+    """
+    if latency_bound:
+        # Simplified latency model (assumes chunking)
+        return latency_us * 1e-6
+    else:
+        # Throughput-bound (production default)
+        if bandwidth_gb_s <= 0:
+            return 0.0
+        return tensor_bytes / (bandwidth_gb_s * 1e9)
+
+
+def _reducescatter_time_s(
+    tensor_bytes: float,
+    bandwidth_gb_s: float,
+    latency_us: float = 0.0,
+    latency_bound: bool = False
+) -> float:
+    """
+    ReduceScatter communication time (same cost as AllGather).
+
+    From JAX scaling-book: ReduceScatter cost = AllGather cost.
+    """
+    return _allgather_time_s(tensor_bytes, bandwidth_gb_s, latency_us, latency_bound)
+
+
+def _allreduce_time_s_scalingbook(
+    tensor_bytes: float,
+    bandwidth_gb_s: float,
+    latency_us: float = 0.0,
+    latency_bound: bool = False
+) -> float:
+    """
+    AllReduce = ReduceScatter + AllGather = 2× cost.
+
+    From JAX scaling-book: T_comm = 2 × (V / W_ici)
+    """
+    return 2.0 * _allgather_time_s(tensor_bytes, bandwidth_gb_s, latency_us, latency_bound)
 
 
 def _compute_workload(workload: Dict) -> Dict:
@@ -271,13 +394,33 @@ def compute_inference_sizing(payload: Dict, include_recommendations: bool = True
 
     tp = _pos_int(parallel.get("tp", 1), 1)
     pp = _pos_int(parallel.get("pp", 1), 1)
-    max_asics = _pos_int(parallel.get("max_asics", 16), 16)
+    max_asics = _pos_int(parallel.get("max_asics", 128), 128)  # Support up to 128 GPUs
 
-    tp_bw = _pos_float(network.get("tp_link_bw_gbs", 900), 900)
-    tp_lat = max(0.0, float(network.get("tp_link_latency_us", 3)))
-    pp_bw = _pos_float(network.get("pp_link_bw_gbs", tp_bw), tp_bw)
-    pp_lat = max(0.0, float(network.get("pp_link_latency_us", tp_lat)))
-    overlap = _clamp(float(network.get("overlap_fraction", 0.0)), 0.0, 1.0)
+    # Detect network model type
+    is_multinode = "gpus_per_node" in network
+
+    if is_multinode:
+        gpus_per_node = _pos_int(network.get("gpus_per_node", 8), 8)
+        intra_bw = _pos_float(network.get("intra_node_bw_gbs", 900), 900)
+        intra_lat = max(0.0, float(network.get("intra_node_latency_us", 3)))
+        inter_bw = _pos_float(network.get("inter_node_bw_gbs", 400), 400)
+        inter_lat = max(0.0, float(network.get("inter_node_latency_us", 10)))
+        overlap = _clamp(float(network.get("overlap_fraction", 0.0)), 0.0, 1.0)
+        # Set legacy variables for PP (which doesn't use multi-node yet)
+        tp_bw = intra_bw
+        tp_lat = intra_lat
+        pp_bw = intra_bw
+        pp_lat = intra_lat
+    else:
+        # Legacy single-tier
+        gpus_per_node = tp  # Assume all GPUs in single node
+        intra_bw = inter_bw = _pos_float(network.get("tp_link_bw_gbs", 900), 900)
+        intra_lat = inter_lat = max(0.0, float(network.get("tp_link_latency_us", 3)))
+        tp_bw = intra_bw
+        tp_lat = intra_lat
+        pp_bw = _pos_float(network.get("pp_link_bw_gbs", tp_bw), tp_bw)
+        pp_lat = max(0.0, float(network.get("pp_link_latency_us", tp_lat)))
+        overlap = _clamp(float(network.get("overlap_fraction", 0.0)), 0.0, 1.0)
 
     stage_of_layer, stages = _partition_layers(len(data["layers"]), pp)
     boundaries = {s["end"] for s in stages[:-1] if s["count"] > 0}
@@ -297,7 +440,14 @@ def compute_inference_sizing(payload: Dict, include_recommendations: bool = True
         layer_tp_bytes = 0.0
         layer_tp_time_s = 0.0
         for sync in layer["tp_sync_points"]:
-            t_s, b_s, lat_s, _ = _ring_ar_time_s(sync["tensor_bytes"], tp, tp_bw, tp_lat)
+            # Update TP all-reduce calculations to use multi-node model
+            if is_multinode:
+                t_s, b_s, lat_s, _, _ = _ring_ar_time_multinode(
+                    sync["tensor_bytes"], tp,
+                    intra_bw, intra_lat, inter_bw, inter_lat, gpus_per_node
+                )
+            else:
+                t_s, b_s, lat_s, _ = _ring_ar_time_s(sync["tensor_bytes"], tp, tp_bw, tp_lat)
             layer_tp_bytes += b_s
             layer_tp_time_s += t_s
             tp_lat_s += lat_s
@@ -360,8 +510,8 @@ def compute_inference_sizing(payload: Dict, include_recommendations: bool = True
 
     recommendations: List[Dict] = []
     if include_recommendations:
-        tp_candidates = [1, 2, 4, 8]
-        pp_candidates = [1, 2, 4]
+        tp_candidates = [1, 2, 4, 8, 16, 32, 64]
+        pp_candidates = [1, 2, 4, 8, 16, 32]
         for tp_c in tp_candidates:
             for pp_c in pp_candidates:
                 asics = tp_c * pp_c
@@ -393,6 +543,13 @@ def compute_inference_sizing(payload: Dict, include_recommendations: bool = True
         recommendations.sort(key=lambda x: (x["latency_ms"], x["asics"]))
         recommendations = recommendations[:3]
 
+    # Calculate tokens_per_s and flops_per_s
+    tokens_per_s = data["token_count"] / end_to_end_s if end_to_end_s > 0 else 0
+    flops_per_s = data["totals"]["flops"] / end_to_end_s if end_to_end_s > 0 else 0
+
+    # Get H for scaling analysis
+    H = _pos_int(workload.get("model", {}).get("H", 4096), 4096)
+
     return {
         "totals": data["totals"],
         "collective": {
@@ -407,19 +564,27 @@ def compute_inference_sizing(payload: Dict, include_recommendations: bool = True
             "network_ms": network_s * 1e3,
             "kernel_ms": kernel_s * 1e3,
             "end_to_end_ms": end_to_end_s * 1e3,
+            "tokens_per_s": tokens_per_s,
+            "flops_per_s": flops_per_s,
         },
         "bottleneck": bottleneck,
         "layer_io": layer_io,
         "recommendations": recommendations,
         "required_to_debottleneck": required,
+        "scaling_analysis": {
+            "critical_batch_size": critical_batch_size(H, peak_tflops, mem_bw_gbs),
+            "inter_chip_critical_dim": inter_chip_critical_dim(peak_tflops, intra_bw),
+            "num_nodes": (tp * pp + gpus_per_node - 1) // gpus_per_node if is_multinode else 1,
+            "cross_node_communication": is_multinode and (tp > gpus_per_node or pp > 1),
+        },
     }
 
 
 def sweep_inference_sizing(payload: Dict) -> Dict:
     req = dict(payload)
-    tp_candidates = req.pop("tp_candidates", [1, 2, 4, 8])
-    pp_candidates = req.pop("pp_candidates", [1, 2, 4])
-    max_asics = _pos_int(req.get("parallel", {}).get("max_asics", 16), 16)
+    tp_candidates = req.pop("tp_candidates", [1, 2, 4, 8, 16, 32, 64])
+    pp_candidates = req.pop("pp_candidates", [1, 2, 4, 8, 16, 32])
+    max_asics = _pos_int(req.get("parallel", {}).get("max_asics", 128), 128)  # Support up to 128 GPUs
 
     base = compute_inference_sizing(req)
     candidates = []

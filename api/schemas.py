@@ -1,7 +1,7 @@
 """Pydantic models for the roofline API."""
 
 from pydantic import BaseModel
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 
 
 class GEMMSpec(BaseModel):
@@ -13,6 +13,7 @@ class GEMMSpec(BaseModel):
     tile_m: int = 128
     tile_n: int = 128
     tile_k: int = 32
+    use_efficiency: bool = True  # Apply empirical efficiency factors (realistic vs ideal)
 
 
 class HardwareSpecInput(BaseModel):
@@ -176,7 +177,7 @@ class SizingParallelSpec(BaseModel):
     """Parallelization controls."""
     tp: int = 1
     pp: int = 1
-    max_asics: int = 16
+    max_asics: int = 128  # Support up to 128 GPUs
 
 
 class SizingNetworkSpec(BaseModel):
@@ -186,6 +187,21 @@ class SizingNetworkSpec(BaseModel):
     pp_link_bw_gbs: float = 900.0
     pp_link_latency_us: float = 3.0
     overlap_fraction: float = 0.0
+
+
+class MultiNodeNetworkSpec(BaseModel):
+    """Multi-node network configuration with intra/inter-node topology."""
+    # Intra-node (NVLink/ICI within single node)
+    intra_node_bw_gbs: float = 900.0       # NVLink bandwidth per link
+    intra_node_latency_us: float = 3.0     # NVLink latency
+    gpus_per_node: int = 8                 # GPUs in single node
+
+    # Inter-node (Ethernet/InfiniBand/DCN between nodes)
+    inter_node_bw_gbs: float = 400.0       # Total inter-node bandwidth
+    inter_node_latency_us: float = 10.0    # Inter-node latency
+
+    # Overlap
+    overlap_fraction: float = 0.0          # Compute/comm overlap (0-1)
 
 
 class SizingRecommendation(BaseModel):
@@ -214,7 +230,7 @@ class SizingRequest(BaseModel):
     workload: WorkloadSpec
     hardware: SizingHardwareSpec
     parallel: SizingParallelSpec
-    network: SizingNetworkSpec
+    network: Union[SizingNetworkSpec, MultiNodeNetworkSpec]  # Accept both
     target_latency_ms: Optional[float] = None
 
 
@@ -234,7 +250,7 @@ class SizingSweepRequest(BaseModel):
     workload: WorkloadSpec
     hardware: SizingHardwareSpec
     parallel: SizingParallelSpec
-    network: SizingNetworkSpec
+    network: Union[SizingNetworkSpec, MultiNodeNetworkSpec]  # Accept both
     tp_candidates: Optional[List[int]] = None
     pp_candidates: Optional[List[int]] = None
 
@@ -243,3 +259,144 @@ class SizingSweepResponse(BaseModel):
     """Sweep response containing base and candidate configurations."""
     base: SizingResponse
     candidates: List[SizingRecommendation]
+
+
+# ═══════════════════════════════════════════════
+#  RUN TRACKING SCHEMAS
+# ═══════════════════════════════════════════════
+
+class RunMetadata(BaseModel):
+    """Metadata for a saved run."""
+    run_id: str                          # UUID
+    timestamp: str                       # ISO 8601
+    name: str                            # User label
+    hardware_key: str                    # "b10", "b200", etc.
+    workload_type: str                   # "transformer", "moe", "custom"
+    config: Dict                         # Full config snapshot
+    results: Dict                        # Performance results
+    tags: List[str] = []                 # ["prefill", "8B", "FP8"]
+    notes: str = ""
+
+
+class RunListItem(BaseModel):
+    """Summary item for run list."""
+    run_id: str
+    timestamp: str
+    name: str
+    hardware_key: str
+    workload_type: str
+    tags: List[str]
+    preview: Dict  # {tflops, latency_ms, bottleneck}
+
+
+class SaveRunRequest(BaseModel):
+    """Request to save a run."""
+    metadata: RunMetadata
+
+
+class CompareRunsRequest(BaseModel):
+    """Request to compare multiple runs."""
+    run_ids: List[str]
+
+
+class ComparisonMetric(BaseModel):
+    """Single metric comparison across runs."""
+    metric: str
+    values: Dict[str, float]  # {run_id: value}
+    deltas: Dict[str, float]  # {run_id: % delta from baseline}
+
+
+class CompareRunsResponse(BaseModel):
+    """Response from run comparison."""
+    runs: List[RunMetadata]
+    comparison_table: List[ComparisonMetric]
+
+
+class ExportRunsRequest(BaseModel):
+    """Request to export runs as JSON."""
+    run_ids: List[str]
+
+
+class ExportRunsResponse(BaseModel):
+    """Response with exported run data."""
+    runs: List[RunMetadata]
+    export_format: str = "json_v1"
+
+
+class ImportRunsRequest(BaseModel):
+    """Request to import runs from JSON."""
+    runs: List[RunMetadata]
+
+
+class ImportRunsResponse(BaseModel):
+    """Response from import."""
+    imported: int
+    errors: List[str]
+
+
+# ═══════════════════════════════════════════════
+#  MOE (MIXTURE OF EXPERTS) SCHEMAS
+# ═══════════════════════════════════════════════
+
+class MoEConfig(BaseModel):
+    """MoE architecture configuration."""
+    num_experts: int = 8
+    experts_per_token: int = 2  # Top-K
+    expert_ffn_dim: int = 14336
+    capacity_factor: float = 1.25
+    load_balance_loss_weight: float = 0.01
+    expert_parallel: int = 1  # EP degree
+
+
+class MoEWorkloadSpec(BaseModel):
+    """MoE workload specification."""
+    model: WorkloadModelSpec
+    moe: MoEConfig
+    precision: WorkloadPrecisionSpec
+    phase: str = "decode"
+    batch: int = 1
+    seq_len: int = 4096
+    network_bw_gbs: float = 900.0  # NVLink/ICI bandwidth
+    network_latency_us: float = 3.0
+    load_imbalance: float = 0.15  # Expected load imbalance
+
+
+class MoEAnalysisResult(BaseModel):
+    """MoE layer performance analysis result."""
+    # Router
+    router_flops: float
+    router_time_us: float
+    router_tflops: float
+    routing_overhead_pct: float
+
+    # Experts
+    expert_flops: float
+    expert_time_us: float
+    expert_tflops: float
+
+    # Communication
+    all_to_all_bytes: float
+    all_to_all_time_us: float
+    communication_overhead_pct: float
+
+    # Totals
+    total_flops: float
+    total_time_us: float
+    total_time_ms: float
+
+    # Load balancing
+    load_imbalance: float
+    capacity_factor: float
+    avg_tokens_per_expert: float
+    expert_utilization: List[float]
+
+    # Sparsity
+    sparsity: float
+    active_experts_pct: float
+
+    # Analysis
+    bottleneck: str
+    recommendations: List[str]
+
+    # Debug info (optional)
+    debug: Optional[Dict] = None

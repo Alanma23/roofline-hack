@@ -94,7 +94,13 @@ class HardwareSpec:
     name: str
     peak_bandwidth_gb_s: float  # GB/s
     peak_flops_tflops: Dict[str, float]  # TFLOPS by precision
-    
+    kernel_efficiency: Optional[Dict[str, Dict[str, float]]] = None  # Empirical efficiency factors by kernel type and precision
+
+    def __post_init__(self):
+        """Initialize kernel_efficiency if not provided"""
+        if self.kernel_efficiency is None:
+            self.kernel_efficiency = {}
+
     def critical_ai(self, precision: str) -> float:
         """
         Calculate critical arithmetic intensity.
@@ -114,9 +120,18 @@ class HardwareSpec:
 
 class RooflineCalculator:
     """Roofline performance predictor"""
-    
-    def __init__(self, hardware: HardwareSpec):
+
+    def __init__(self, hardware: HardwareSpec, use_efficiency: bool = True):
+        """
+        Initialize roofline calculator.
+
+        Args:
+            hardware: Hardware specification with peak specs
+            use_efficiency: If True, apply empirical efficiency factors (realistic).
+                          If False, use ideal peak specs (educational/debugging).
+        """
         self.hardware = hardware
+        self.use_efficiency = use_efficiency
     
     def predict_gemv(self, N: int, K: int, precision: str) -> Dict:
         """
@@ -127,9 +142,12 @@ class RooflineCalculator:
         flop_count = gemv_flops(N, K)
         bytes_used = gemv_bytes(N, K, bpe, bpe_output=2.0)
 
+        # Apply efficiency factors if enabled
+        effective_tflops, efficiency_factor = self._get_effective_tflops(precision, "gemv")
         peak_tflops = self._peak_tflops(precision)
+
         pred_time_s, predicted_tflops, critical_ai, bottleneck = roofline_time(
-            flop_count, bytes_used, peak_tflops, self.hardware.peak_bandwidth_gb_s
+            flop_count, bytes_used, effective_tflops, self.hardware.peak_bandwidth_gb_s
         )
         ai = arithmetic_intensity(flop_count, bytes_used)
 
@@ -141,6 +159,9 @@ class RooflineCalculator:
             "bottleneck": bottleneck,
             "flops": flop_count,
             "bytes": int(bytes_used),
+            "efficiency_factor": efficiency_factor,
+            "peak_tflops": peak_tflops,
+            "effective_tflops": effective_tflops,
         }
 
     def _peak_tflops(self, precision: str) -> float:
@@ -152,6 +173,29 @@ class RooflineCalculator:
             peak = self.hardware.peak_flops_tflops.get("FP16", 1.0)
         return peak
 
+    def _get_effective_tflops(self, precision: str, kernel_type: str) -> tuple[float, float]:
+        """
+        Get effective TFLOPS with optional efficiency factor applied.
+
+        Args:
+            precision: Precision format (FP16, FP8_E4M3, etc.)
+            kernel_type: Kernel type ("gemv", "gemm", "attention")
+
+        Returns:
+            (effective_tflops, efficiency_factor) tuple
+        """
+        peak = self._peak_tflops(precision)
+
+        # If use_efficiency disabled or no efficiency data, return ideal peak
+        if not self.use_efficiency or not self.hardware.kernel_efficiency:
+            return (peak, 1.0)
+
+        # Lookup efficiency factor for this kernel + precision
+        eff = self.hardware.kernel_efficiency.get(kernel_type, {}).get(precision, 1.0)
+        effective = peak * eff
+
+        return (effective, eff)
+
     def predict_gemm(self, M: int, N: int, K: int, precision: str) -> Dict:
         """
         Predict GEMM performance: C[M,N] = A[M,K] @ B[K,N]
@@ -161,9 +205,12 @@ class RooflineCalculator:
         flop_count = gemm_flops(M, N, K)
         bytes_used = gemm_bytes(M, N, K, bpe, bpe_output=2.0)
 
+        # Apply efficiency factors if enabled
+        effective_tflops, efficiency_factor = self._get_effective_tflops(precision, "gemm")
         peak_tflops = self._peak_tflops(precision)
+
         pred_time_s, predicted_tflops, critical_ai, bottleneck = roofline_time(
-            flop_count, bytes_used, peak_tflops, self.hardware.peak_bandwidth_gb_s
+            flop_count, bytes_used, effective_tflops, self.hardware.peak_bandwidth_gb_s
         )
         ai = arithmetic_intensity(flop_count, bytes_used)
 
@@ -175,6 +222,9 @@ class RooflineCalculator:
             "bottleneck": bottleneck,
             "flops": flop_count,
             "bytes": int(bytes_used),
+            "efficiency_factor": efficiency_factor,
+            "peak_tflops": peak_tflops,
+            "effective_tflops": effective_tflops,
         }
 
     def predict_attention(
@@ -195,9 +245,13 @@ class RooflineCalculator:
         bytes_used = 4 * batch * num_heads * seq_len * head_dim * bpe
 
         ai = arithmetic_intensity(flop_count, bytes_used)
+
+        # Apply efficiency factors (use gemv for memory-bound attention)
+        effective_tflops, efficiency_factor = self._get_effective_tflops(precision, "gemv")
         peak_tflops = self._peak_tflops(precision)
+
         pred_time_s, predicted_tflops, critical_ai, bottleneck = roofline_time(
-            flop_count, bytes_used, peak_tflops, self.hardware.peak_bandwidth_gb_s
+            flop_count, bytes_used, effective_tflops, self.hardware.peak_bandwidth_gb_s
         )
 
         return {
@@ -206,6 +260,9 @@ class RooflineCalculator:
             "ai": ai,
             "critical_ai": critical_ai,
             "bottleneck": bottleneck,
+            "efficiency_factor": efficiency_factor,
+            "peak_tflops": peak_tflops,
+            "effective_tflops": effective_tflops,
             "flops": flop_count,
             "bytes": int(bytes_used),
         }

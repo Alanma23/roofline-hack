@@ -94,6 +94,60 @@ def critical_ai(peak_tflops: float, bandwidth_gb_s: float) -> float:
     return (peak_tflops * 1e12) / (bandwidth_gb_s * 1e9)
 
 
+def critical_batch_size(
+    hidden_dim: int,
+    peak_tflops: float,
+    bandwidth_gb_s: float
+) -> int:
+    """
+    Calculate minimum batch size for compute-bound matmul.
+
+    From JAX scaling-book:
+    For matmul with shape (B, D, D), intensity ≈ B FLOPs/byte.
+    Critical batch size B_crit = Peak_FLOPS / Bandwidth.
+
+    Args:
+        hidden_dim: Model hidden dimension (D)
+        peak_tflops: Peak TFLOPS of hardware
+        bandwidth_gb_s: Memory bandwidth in GB/s
+
+    Returns:
+        Minimum batch size (in tokens) to be compute-bound
+    """
+    crit_ai = critical_ai(peak_tflops, bandwidth_gb_s)
+    # For square matmul (B, D, D): intensity ≈ B when B << D
+    # So B_crit ≈ critical_AI
+    return int(crit_ai)
+
+
+def inter_chip_critical_dim(
+    peak_tflops: float,
+    network_bandwidth_gb_s: float
+) -> int:
+    """
+    Calculate minimum hidden dimension for compute-bound inter-chip matmul.
+
+    From JAX scaling-book:
+    For inter-chip matmul, critical threshold depends on D/2.
+    D/2 > Peak_FLOPS / Network_Bandwidth
+
+    Args:
+        peak_tflops: Peak TFLOPS per chip
+        network_bandwidth_gb_s: Inter-chip network bandwidth
+
+    Returns:
+        Minimum hidden dimension to be compute-bound
+    """
+    # Convert to FLOP/s and bytes/s
+    peak_flops = peak_tflops * 1e12
+    bandwidth_bytes = network_bandwidth_gb_s * 1e9
+
+    # D/2 > Peak_FLOPS / Bandwidth
+    # D > 2 * Peak_FLOPS / Bandwidth
+    d_min = 2.0 * peak_flops / bandwidth_bytes if bandwidth_bytes > 0 else 0
+    return int(d_min)
+
+
 # ═══════════════════════════════════════════════
 #  ROOFLINE PREDICTION
 # ═══════════════════════════════════════════════

@@ -79,4 +79,4 @@ Results appear instantly on your local browser!
 
 ---
 
-**Full docs:** See `SSH_TUNNEL_SETUP.md` and `IMPLEMENTATION_SUMMARY.md`
+**Full docs:** See `B10_REMOTE_GUIDE.md` and `IMPLEMENTATION_SUMMARY.md`
