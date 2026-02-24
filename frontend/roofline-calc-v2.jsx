@@ -1339,6 +1339,8 @@ export default function App() {
   const [highlightedSection, setHighlightedSection] = useState(null);
   const [cudaAvailable, setCudaAvailable] = useState(null);
   const [savedRuns, setSavedRuns] = useState([]);
+  const [selectedRunsForComparison, setSelectedRunsForComparison] = useState([]);
+  const [showComparison, setShowComparison] = useState(false);
   const [moeResults, setMoeResults] = useState(null);
   const [moeLoading, setMoeLoading] = useState(false);
 
@@ -1413,6 +1415,18 @@ export default function App() {
           tflops: attainable(op.ai, peakT, hw.bw) / 1e12,
           label: op.name,
         })),
+        // Include MoE analysis results if available
+        ...(isMoE && moeResults && {
+          moe_router_time_us: moeResults.router_time_us,
+          moe_expert_time_us: moeResults.expert_time_us,
+          moe_all_to_all_time_us: moeResults.all_to_all_time_us,
+          moe_total_time_ms: moeResults.total_time_ms,
+          moe_bottleneck: moeResults.bottleneck,
+          moe_load_imbalance: moeResults.load_imbalance,
+          moe_expert_tflops: moeResults.expert_tflops,
+          moe_sparsity: moeResults.sparsity,
+          moe_communication_overhead_pct: moeResults.communication_overhead_pct,
+        }),
       },
       tags: [
         phase,
@@ -1453,6 +1467,43 @@ export default function App() {
     if (run.config.seq_len) setS(run.config.seq_len);
     if (run.config.use_efficiency !== undefined) setUseEfficiency(run.config.use_efficiency);
     alert(`Loaded run: ${run.name}`);
+  };
+
+  const toggleRunSelection = (run_id) => {
+    setSelectedRunsForComparison(prev =>
+      prev.includes(run_id) ? prev.filter(id => id !== run_id) : [...prev, run_id]
+    );
+  };
+
+  const exportSelectedRuns = () => {
+    const runs = selectedRunsForComparison.length > 0
+      ? selectedRunsForComparison
+      : savedRuns.map(r => r.run_id);
+
+    if (runs.length === 0) {
+      alert("No runs to export");
+      return;
+    }
+
+    RunStorage.export(runs);
+  };
+
+  const importRuns = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const count = await RunStorage.import(file);
+      const runs = Object.values(RunStorage.list());
+      runs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      setSavedRuns(runs);
+      alert(`Imported ${count} runs successfully!`);
+    } catch (err) {
+      alert(`Import failed: ${err.message}`);
+    }
+
+    // Reset file input
+    e.target.value = '';
   };
 
   const analyzeMoE = async () => {
@@ -1689,6 +1740,122 @@ export default function App() {
             </div>
           </div>
 
+          {/* MoE Configuration */}
+          {model.moe && (
+            <div style={P}>
+              <span style={L}>MoE Configuration</span>
+              <div style={{fontSize:9,color:"#64748b",marginBottom:6}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                  <span>Experts:</span>
+                  <span style={{color:"#e2e8f0"}}>{model.moe.num_experts} total, {model.moe.experts_per_token} active</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                  <span>Sparsity:</span>
+                  <span style={{color:"#22c55e"}}>{((1 - model.moe.experts_per_token / model.moe.num_experts) * 100).toFixed(1)}%</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                  <span>Expert FFN:</span>
+                  <span style={{color:"#e2e8f0"}}>{model.moe.expert_ffn_dim}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                  <span>Capacity Factor:</span>
+                  <span style={{color:"#e2e8f0"}}>{model.moe.capacity_factor.toFixed(2)}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                  <span>Expert Parallel:</span>
+                  <span style={{color:"#e2e8f0"}}>{model.moe.expert_parallel}x</span>
+                </div>
+              </div>
+              <button
+                onClick={analyzeMoE}
+                disabled={moeLoading}
+                style={{
+                  ...btn(false),
+                  width:"100%",
+                  background: moeLoading ? "#1e293b" : "#0ea5e9",
+                  color: moeLoading ? "#64748b" : "#fff",
+                  cursor: moeLoading ? "not-allowed" : "pointer",
+                }}
+              >
+                {moeLoading ? "Analyzing..." : "🔬 Analyze MoE Performance"}
+              </button>
+              {moeResults && (
+                <div style={{marginTop:8,padding:8,background:"#0f172a",borderRadius:4,fontSize:8}}>
+                  <div style={{color:"#94a3b8",marginBottom:4,fontWeight:600}}>Results:</div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                    <span style={{color:"#64748b"}}>Total Time:</span>
+                    <span style={{color:"#e2e8f0",fontWeight:600}}>{moeResults.total_time_ms.toFixed(2)} ms</span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                    <span style={{color:"#64748b"}}>Router:</span>
+                    <span style={{color:"#94a3b8"}}>{moeResults.router_time_us.toFixed(1)} μs ({moeResults.routing_overhead_pct.toFixed(1)}%)</span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                    <span style={{color:"#64748b"}}>Experts:</span>
+                    <span style={{color:"#94a3b8"}}>{moeResults.expert_time_us.toFixed(1)} μs</span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                    <span style={{color:"#64748b"}}>All-to-All:</span>
+                    <span style={{color:"#94a3b8"}}>{moeResults.all_to_all_time_us.toFixed(1)} μs ({moeResults.communication_overhead_pct.toFixed(1)}%)</span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                    <span style={{color:"#64748b"}}>Bottleneck:</span>
+                    <span style={{
+                      color: moeResults.bottleneck === "communication" ? "#f59e0b" :
+                             moeResults.bottleneck === "load_imbalance" ? "#ef4444" : "#22c55e",
+                      fontWeight: 600
+                    }}>
+                      {moeResults.bottleneck}
+                    </span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span style={{color:"#64748b"}}>Throughput:</span>
+                    <span style={{color:"#e2e8f0"}}>{moeResults.expert_tflops.toFixed(1)} TFLOPS</span>
+                  </div>
+
+                  {/* Expert Utilization Heatmap */}
+                  {moeResults.expert_utilization && moeResults.expert_utilization.length > 0 && (
+                    <div style={{marginTop:6,paddingTop:6,borderTop:"1px solid #1e293b"}}>
+                      <div style={{color:"#64748b",marginBottom:3,fontSize:7}}>
+                        Expert Utilization ({moeResults.expert_utilization.length} experts):
+                      </div>
+                      <div style={{display:"flex",gap:1,flexWrap:"wrap"}}>
+                        {moeResults.expert_utilization.map((util, i) => {
+                          const color = util > 80 ? "#22c55e" : util > 50 ? "#3b82f6" : util > 20 ? "#f59e0b" : "#64748b";
+                          return (
+                            <div
+                              key={i}
+                              title={`Expert ${i}: ${util.toFixed(1)}% utilized`}
+                              style={{
+                                width: moeResults.expert_utilization.length > 32 ? 3 : 6,
+                                height: 20,
+                                background: `linear-gradient(to top, ${color} ${util}%, #1e293b ${util}%)`,
+                                borderRadius: 1,
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:7,color:"#64748b",marginTop:2}}>
+                        <span>Load Imbalance: {(moeResults.load_imbalance * 100).toFixed(1)}%</span>
+                        <span>Avg: {(moeResults.expert_utilization.reduce((a,b)=>a+b,0)/moeResults.expert_utilization.length).toFixed(1)}%</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {moeResults.recommendations && moeResults.recommendations.length > 0 && (
+                    <div style={{marginTop:6,paddingTop:6,borderTop:"1px solid #1e293b"}}>
+                      <div style={{color:"#64748b",marginBottom:2,fontSize:7}}>Recommendations:</div>
+                      {moeResults.recommendations.map((rec, i) => (
+                        <div key={i} style={{color:"#94a3b8",fontSize:7,marginBottom:1}}>• {rec}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Pin */}
           <div style={P}>
             <span style={L}>Compare</span>
@@ -1698,29 +1865,93 @@ export default function App() {
             </div>)}
           </div>
 
-          {/* Save Run */}
+          {/* Save Run & Compare */}
           <div style={P}>
-            <span style={L}>Save Run</span>
+            <span style={L}>Saved Runs</span>
             <button onClick={saveCurrentRun} style={{...btn(false),width:"100%",marginBottom:6}}>💾 Save current configuration</button>
+
             {savedRuns.length > 0 && (
-              <div style={{maxHeight:200,overflowY:"auto"}}>
-                {savedRuns.slice(0, 5).map(run => (
-                  <div key={run.run_id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:8,color:"#94a3b8",padding:"3px 0",borderBottom:"1px solid #1e293b"}}>
-                    <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={() => loadRun(run)}>
-                      <div style={{fontWeight:500,color:"#cbd5e1",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{run.name}</div>
-                      <div style={{color:"#64748b",fontSize:7}}>
-                        {run.tags.slice(0,3).join(" · ")} · {new Date(run.timestamp).toLocaleDateString()}
-                      </div>
-                    </div>
-                    <button onClick={() => deleteRun(run.run_id)} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:9,padding:"0 4px"}}>✕</button>
-                  </div>
-                ))}
-                {savedRuns.length > 5 && (
-                  <div style={{fontSize:7,color:"#475569",textAlign:"center",marginTop:4}}>
-                    +{savedRuns.length - 5} more runs
+              <>
+                {/* Export/Import buttons */}
+                <div style={{display:"flex",gap:4,marginBottom:6}}>
+                  <button onClick={exportSelectedRuns} style={{...btn(false),flex:1,fontSize:8,padding:"4px 8px"}}>
+                    📤 Export ({selectedRunsForComparison.length || savedRuns.length})
+                  </button>
+                  <label style={{...btn(false),flex:1,fontSize:8,padding:"4px 8px",cursor:"pointer",textAlign:"center"}}>
+                    📥 Import
+                    <input type="file" accept=".json" onChange={importRuns} style={{display:"none"}} />
+                  </label>
+                </div>
+
+                {/* Compare button */}
+                {selectedRunsForComparison.length >= 2 && (
+                  <button
+                    onClick={() => setShowComparison(!showComparison)}
+                    style={{...btn(showComparison),width:"100%",marginBottom:6,fontSize:9}}
+                  >
+                    {showComparison ? "Hide" : "📊 Compare"} ({selectedRunsForComparison.length} selected)
+                  </button>
+                )}
+
+                {/* Comparison Table */}
+                {showComparison && selectedRunsForComparison.length >= 2 && (
+                  <div style={{background:"#0f172a",borderRadius:4,padding:8,marginBottom:6,fontSize:7}}>
+                    <div style={{color:"#94a3b8",fontWeight:600,marginBottom:4}}>Comparison:</div>
+                    {["tflops", "latency_ms", "throughput_tok_s"].map(metric => {
+                      const selectedRuns = savedRuns.filter(r => selectedRunsForComparison.includes(r.run_id));
+                      const values = selectedRuns.map(r => parseFloat(r.results[metric]) || 0);
+                      const baseline = values[0];
+                      return (
+                        <div key={metric} style={{marginBottom:3}}>
+                          <div style={{color:"#64748b",marginBottom:1}}>{metric.replace(/_/g, " ")}:</div>
+                          {selectedRuns.map((r, i) => {
+                            const val = values[i];
+                            const delta = baseline ? ((val - baseline) / baseline * 100) : 0;
+                            return (
+                              <div key={r.run_id} style={{display:"flex",justifyContent:"space-between",paddingLeft:8}}>
+                                <span style={{color:"#94a3b8",fontSize:6}}>{r.name.slice(0,20)}</span>
+                                <span style={{color:"#e2e8f0"}}>
+                                  {val.toFixed(2)} {i > 0 && (
+                                    <span style={{color: delta > 0 ? "#22c55e" : "#ef4444",fontSize:6,marginLeft:3}}>
+                                      ({delta > 0 ? "+" : ""}{delta.toFixed(1)}%)
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
-              </div>
+
+                {/* Runs list with checkboxes */}
+                <div style={{maxHeight:200,overflowY:"auto"}}>
+                  {savedRuns.slice(0, 10).map(run => (
+                    <div key={run.run_id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:8,color:"#94a3b8",padding:"3px 0",borderBottom:"1px solid #1e293b"}}>
+                      <input
+                        type="checkbox"
+                        checked={selectedRunsForComparison.includes(run.run_id)}
+                        onChange={() => toggleRunSelection(run.run_id)}
+                        style={{marginRight:6,cursor:"pointer"}}
+                      />
+                      <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={() => loadRun(run)}>
+                        <div style={{fontWeight:500,color:"#cbd5e1",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{run.name}</div>
+                        <div style={{color:"#64748b",fontSize:7}}>
+                          {run.tags.slice(0,3).join(" · ")} · {new Date(run.timestamp).toLocaleDateString()}
+                        </div>
+                      </div>
+                      <button onClick={() => deleteRun(run.run_id)} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:9,padding:"0 4px"}}>✕</button>
+                    </div>
+                  ))}
+                  {savedRuns.length > 10 && (
+                    <div style={{fontSize:7,color:"#475569",textAlign:"center",marginTop:4}}>
+                      +{savedRuns.length - 10} more runs
+                    </div>
+                  )}
+                </div>
+              </>
             )}
             {savedRuns.length === 0 && (
               <div style={{fontSize:8,color:"#475569",fontStyle:"italic",marginTop:4}}>
@@ -1775,6 +2006,7 @@ export default function App() {
             <button onClick={()=>setRightTab("benchmark")} style={btn(rightTab==="benchmark")}>Benchmark</button>
             <button onClick={()=>setRightTab("import")} style={btn(rightTab==="import")}>Import</button>
             <button onClick={()=>setRightTab("format")} style={btn(rightTab==="format")}>Format</button>
+            <button onClick={()=>setRightTab("optimize")} style={{...btn(rightTab==="optimize"), background: rightTab==="optimize"?"#7c3aed":"#1e293b", borderColor: rightTab==="optimize"?"#7c3aed":"#334155"}}>★ Optimize</button>
           </div>
           {rightTab === "benchmark" && (
             <BenchmarkPanel
@@ -1889,8 +2121,239 @@ export default function App() {
             )}
           </div>
           )}
+          {rightTab === "optimize" && (
+            <OptimizerPanel
+              workload={{ phase, batch: B, seq_len: S, model: MODELS[modelName], precision: CONFIGS[cfgName] }}
+              hardware={{ name: hwName, peak_tflops: hw.flops, mem_bw_gbs: hw.bw }}
+              apiBase={API_BASE}
+            />
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
+//  OPTIMIZER PANEL COMPONENT
+// ═══════════════════════════════════════════════
+function OptimizerPanel({ workload, hardware, apiBase }) {
+  const [targetLatencyMs, setTargetLatencyMs] = useState(20);
+  const [targetThroughput, setTargetThroughput] = useState(0);
+  const [maxNodes, setMaxNodes] = useState(8);
+  const [maxAsics, setMaxAsics] = useState(64);
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState(null);
+  const [error, setError] = useState(null);
+  const [suggestion, setSuggestion] = useState(null);
+  const [runHistory, setRunHistory] = useState([]);
+
+  const P = { background:"#0f172a", borderRadius:6, padding:10, marginBottom:8, border:"1px solid #1e293b" };
+  const L = { fontSize:9, color:"#475569", textTransform:"uppercase", letterSpacing:.8, marginBottom:4, display:"block" };
+  const inp = { background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:3, padding:"3px 5px", fontSize:10, width:"100%", fontFamily:"monospace", outline:"none" };
+  const btnS = a => ({ background:a?"#7c3aed":"#1e293b", color:a?"#fff":"#94a3b8", border:"1px solid "+(a?"#7c3aed":"#334155"), borderRadius:3, padding:"4px 8px", fontSize:10, cursor:"pointer", fontFamily:"monospace" });
+
+  const fmtMs = v => !Number.isFinite(v) ? "-" : v < 1 ? `${(v*1000).toFixed(2)}μs` : `${v.toFixed(2)}ms`;
+
+  const runSearch = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const req = {
+        workload: {
+          phase: workload.phase || "decode",
+          batch: workload.batch || 1,
+          seq_len: workload.seq_len || 4096,
+          model: {
+            L: workload.model?.L || 32,
+            H: workload.model?.H || 4096,
+            nh: workload.model?.nh || 32,
+            nkv: workload.model?.nkv || 8,
+            dh: workload.model?.dh || 128,
+            dff: workload.model?.dff || 14336,
+            V: workload.model?.V || 32000,
+            gate: workload.model?.gate ?? true,
+          },
+          precision: {
+            w: workload.precision?.w || "FP16",
+            a: workload.precision?.a || "FP16",
+            kv: workload.precision?.kv || "FP16",
+            computeAs: workload.precision?.computeAs || "FP16",
+          },
+        },
+        hardware: {
+          name: hardware.name || "Custom ASIC",
+          peak_tflops: hardware.peak_tflops || { FP16: 100 },
+          mem_bw_gbs: hardware.mem_bw_gbs || 4000,
+        },
+        target: {
+          latency_ms: targetLatencyMs > 0 ? targetLatencyMs : null,
+          throughput_tok_s: targetThroughput > 0 ? targetThroughput : null,
+          max_nodes: maxNodes,
+          max_asics: maxAsics,
+        },
+        ep_candidates: workload.model?.moe ? [1, 2, 4, 8] : [1],
+        network: {
+          tp_link_bw_gbs: 900,
+          intranode_bw_gbs: 900,
+          intranode_lat_us: 1,
+          internode_bw_gbs: 25,
+          internode_lat_us: 5,
+          gpus_per_node: 8,
+        },
+      };
+
+      const resp = await fetch(`${apiBase}/api/optimizer/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      const data = await resp.json();
+      setResults(data);
+
+      // Update run history for suggest-next
+      const newHistory = (data.configs || []).slice(0, 5).map(c => ({
+        bottleneck: c.bottleneck,
+        tp: c.tp, pp: c.pp, ep: c.ep,
+        latency_ms: c.predicted_latency_ms,
+        network_time_ms: c.network_time_ms,
+        ep_time_ms: c.ep_time_ms,
+        ep_uses_internode: c.ep_uses_internode,
+      }));
+      setRunHistory(prev => [...prev.slice(-20), ...newHistory]);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getSuggestion = async () => {
+    if (!runHistory.length) return;
+    try {
+      const resp = await fetch(`${apiBase}/api/optimizer/suggest-next`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_history: runHistory }),
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      setSuggestion(data);
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  return (
+    <div>
+      <div style={P}>
+        <span style={L}>Target constraints</span>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:4 }}>
+          <label>
+            <span style={L}>Max latency (ms)</span>
+            <input type="number" min={0} value={targetLatencyMs}
+              onChange={e => setTargetLatencyMs(parseFloat(e.target.value)||0)} style={inp} />
+          </label>
+          <label>
+            <span style={L}>Min tok/s (0=any)</span>
+            <input type="number" min={0} value={targetThroughput}
+              onChange={e => setTargetThroughput(parseFloat(e.target.value)||0)} style={inp} />
+          </label>
+          <label>
+            <span style={L}>Max nodes</span>
+            <input type="number" min={1} value={maxNodes}
+              onChange={e => setMaxNodes(parseInt(e.target.value)||8)} style={inp} />
+          </label>
+          <label>
+            <span style={L}>Max ASICs</span>
+            <input type="number" min={1} value={maxAsics}
+              onChange={e => setMaxAsics(parseInt(e.target.value)||64)} style={inp} />
+          </label>
+        </div>
+        <button onClick={runSearch} disabled={loading}
+          style={{...btnS(true), width:"100%", marginTop:6, opacity:loading?.6:1}}>
+          {loading ? "Searching..." : "★ Optimize"}
+        </button>
+        {error && <div style={{color:"#f87171",fontSize:9,marginTop:4}}>{error}</div>}
+      </div>
+
+      {results && (
+        <>
+          <div style={P}>
+            <div style={{fontSize:9, color:"#475569", textTransform:"uppercase", letterSpacing:.8, marginBottom:4}}>
+              Results — {results.total_searched} configs · {results.pareto_count} Pareto-optimal
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:8,fontFamily:"monospace"}}>
+                <thead>
+                  <tr style={{color:"#64748b"}}>
+                    <th align="left">★</th>
+                    <th align="left">TP</th>
+                    <th align="left">PP</th>
+                    <th align="left">EP</th>
+                    <th align="left">Prec</th>
+                    <th align="left">BN</th>
+                    <th align="right">Latency</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(results.configs || []).slice(0, 12).map((c, i) => (
+                    <tr key={i} style={{color: c.pareto_optimal ? "#a78bfa" : "#64748b"}}>
+                      <td>{c.pareto_optimal ? "★" : "·"}</td>
+                      <td>{c.tp}</td>
+                      <td>{c.pp}</td>
+                      <td style={{color: c.ep > 1 ? (c.ep_uses_internode ? "#f97316" : "#a78bfa") : "inherit"}}>
+                        {c.ep}{c.ep_uses_internode ? "↗" : ""}
+                      </td>
+                      <td style={{fontSize:7}}>{c.precision.slice(0,6)}</td>
+                      <td style={{color: c.bottleneck==="network" ? "#f59e0b" : c.bottleneck==="compute" ? "#ef4444" : "#60a5fa", fontSize:7}}>
+                        {c.bottleneck.slice(0,3).toUpperCase()}
+                      </td>
+                      <td align="right" style={{color: c.pareto_optimal ? "#22c55e" : "inherit"}}>
+                        {fmtMs(c.predicted_latency_ms)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{fontSize:7,color:"#475569",marginTop:4}}>
+              ★ Pareto-optimal · ↗ EP crosses node (IB) · BN=bottleneck
+            </div>
+          </div>
+
+          <div style={P}>
+            <button onClick={getSuggestion}
+              style={{...btnS(false), width:"100%", marginBottom:6, fontSize:9}}>
+              Get next-step suggestion
+            </button>
+            {suggestion && (
+              <div style={{fontSize:9, lineHeight:1.6}}>
+                <div style={{color:"#a78bfa", fontWeight:600, marginBottom:3}}>
+                  Action: {suggestion.action}
+                </div>
+                <div style={{color:"#94a3b8", marginBottom:3}}>{suggestion.reason}</div>
+                <div style={{color:"#22c55e"}}>{suggestion.suggested_change}</div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {!results && !loading && (
+        <div style={{...P, fontSize:9, color:"#475569", lineHeight:1.7}}>
+          <div style={{color:"#e2e8f0", marginBottom:4}}>EP co-design workflow:</div>
+          <div>1. Set latency target (e.g. 20ms)</div>
+          <div>2. Click Optimize → sweeps TP/PP/EP</div>
+          <div>3. ★ = Pareto-optimal configs</div>
+          <div>4. ↗ = EP crosses node boundary (watch IB)</div>
+          <div>5. "Next step" shows what to change</div>
+          <div style={{color:"#7c3aed", marginTop:4}}>
+            Anchor: Mixtral 8x7B · EP=8 intranode (NVLink OK) vs EP=16 cross-node (IB bottleneck)
+          </div>
+        </div>
+      )}
     </div>
   );
 }

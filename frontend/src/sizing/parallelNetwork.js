@@ -38,6 +38,44 @@ export function ringAllReduceTimeSeconds(tensorBytes, tp, linkBwGBs, latencyUs) 
   };
 }
 
+/**
+ * All-to-all bytes exchanged for EP dispatch/gather.
+ * Each rank sends (ep-1)/ep * tensorBytes and receives (ep-1)/ep * tensorBytes.
+ * Total bytes moved = 2 * (ep-1)/ep * tensorBytes.
+ */
+export function allToAllBytes(tensorBytes, ep) {
+  const rankCount = toPositiveInt(ep, 1);
+  if (rankCount <= 1) return 0;
+  const bytes = toPositiveNumber(tensorBytes, 0);
+  return 2 * ((rankCount - 1) / rankCount) * bytes;
+}
+
+/**
+ * All-to-all time for EP dispatch/gather.
+ * Latency model: log2(ep) hops × latencyUs (bisection tree).
+ * Bandwidth model: bytes / (bwGBs * 1e9).
+ */
+export function allToAllTimeSeconds(tensorBytes, ep, bwGBs, latencyUs) {
+  const rankCount = toPositiveInt(ep, 1);
+  if (rankCount <= 1) {
+    return { total_s: 0, bytes: 0, latency_s: 0, bandwidth_s: 0 };
+  }
+
+  const bytes = allToAllBytes(tensorBytes, rankCount);
+  // log2(ep) hops for bisection reduction
+  const hops = Math.max(1, Math.ceil(Math.log2(rankCount)));
+  const latencyS = hops * toPositiveNumber(latencyUs, 0) * 1e-6;
+  const bw = toPositiveNumber(bwGBs, 0);
+  const bandwidthS = bw > 0 ? bytes / (bw * 1e9) : Number.POSITIVE_INFINITY;
+
+  return {
+    total_s: latencyS + bandwidthS,
+    bytes,
+    latency_s: latencyS,
+    bandwidth_s: bandwidthS,
+  };
+}
+
 export function p2pSendTimeSeconds(bytes, linkBwGBs, latencyUs) {
   const payload = toPositiveNumber(bytes, 0);
   if (payload <= 0) {
@@ -86,13 +124,26 @@ export function computeParallelNetwork(workload, layerRecords, parallel = {}, ne
 
   const tp = toPositiveInt(parallel.tp, 1);
   const pp = toPositiveInt(parallel.pp, 1);
+  const ep = toPositiveInt(parallel.ep, 1);
   const maxAsics = toPositiveInt(parallel.max_asics, 16);
 
+  // Network topology: support both legacy flat BW and intranode/internode split
   const tpLinkBw = toPositiveNumber(network.tp_link_bw_gbs, 900);
   const tpLinkLatencyUs = toPositiveNumber(network.tp_link_latency_us, 3);
   const ppLinkBw = toPositiveNumber(network.pp_link_bw_gbs, tpLinkBw);
   const ppLinkLatencyUs = toPositiveNumber(network.pp_link_latency_us, tpLinkLatencyUs);
   const overlapFraction = clamp(Number(network.overlap_fraction ?? 0), 0, 1);
+
+  // EP-specific network params (intranode = NVLink, internode = IB)
+  const gpusPerNode = toPositiveInt(network.gpus_per_node, 8);
+  const intranodeBw = toPositiveNumber(network.intranode_bw_gbs, tpLinkBw);
+  const intranodeLatUs = toPositiveNumber(network.intranode_lat_us, 1);
+  const internodeBw = toPositiveNumber(network.internode_bw_gbs, 25);
+  const internodeLatUs = toPositiveNumber(network.internode_lat_us, 5);
+
+  // Determine EP all-to-all BW: intranode if ep fits in one node, else internode
+  const epBw = ep <= gpusPerNode ? intranodeBw : internodeBw;
+  const epLatUs = ep <= gpusPerNode ? intranodeLatUs : internodeLatUs;
 
   const partition = partitionLayers(layerCount, pp);
   const stageByLayer = partition.stageOfLayer;
@@ -110,6 +161,12 @@ export function computeParallelNetwork(workload, layerRecords, parallel = {}, ne
   let ppLatencyS = 0;
   let ppBandwidthS = 0;
 
+  let epAlltoallCount = 0;
+  let epAlltoallBytes = 0;
+  let epTimeS = 0;
+  let epLatencyS = 0;
+  let epBandwidthS = 0;
+
   const boundaryLayer = new Set();
   for (let i = 0; i < stages.length - 1; i += 1) {
     const stage = stages[i];
@@ -119,6 +176,7 @@ export function computeParallelNetwork(workload, layerRecords, parallel = {}, ne
   const layerCollective = records.map((layer, index) => {
     const stage = stageByLayer[index] ?? 0;
     const syncPoints = Array.isArray(layer.tp_sync_points) ? layer.tp_sync_points : [];
+    const expertSyncPoints = Array.isArray(layer.expert_sync_points) ? layer.expert_sync_points : [];
 
     let layerTPBytes = 0;
     let layerTPTimeS = 0;
@@ -158,6 +216,27 @@ export function computeParallelNetwork(workload, layerRecords, parallel = {}, ne
       ppBandwidthS += send.bandwidth_s;
     }
 
+    // EP all-to-all (only on MoE layers, only when ep > 1)
+    let layerEPBytes = 0;
+    let layerEPTimeS = 0;
+    let layerEPLatencyS = 0;
+    let layerEPBandwidthS = 0;
+
+    if (ep > 1 && expertSyncPoints.length > 0) {
+      for (const esp of expertSyncPoints) {
+        const t = allToAllTimeSeconds(esp.tensor_bytes, ep, epBw, epLatUs);
+        layerEPBytes += t.bytes;
+        layerEPTimeS += t.total_s;
+        layerEPLatencyS += t.latency_s;
+        layerEPBandwidthS += t.bandwidth_s;
+      }
+      epAlltoallCount += expertSyncPoints.length;
+      epAlltoallBytes += layerEPBytes;
+      epTimeS += layerEPTimeS;
+      epLatencyS += layerEPLatencyS;
+      epBandwidthS += layerEPBandwidthS;
+    }
+
     return {
       layer: index,
       stage,
@@ -167,17 +246,26 @@ export function computeParallelNetwork(workload, layerRecords, parallel = {}, ne
       pp_boundary_send_count: layerPPBytes > 0 ? 1 : 0,
       pp_boundary_send_bytes: layerPPBytes,
       pp_time_ms: layerPPTimeS * 1e3,
+      ep_alltoall_count: expertSyncPoints.length,
+      ep_alltoall_bytes: layerEPBytes,
+      ep_time_ms: layerEPTimeS * 1e3,
     };
   });
 
   return {
-    parallel: { tp, pp, max_asics: maxAsics },
+    parallel: { tp, pp, ep, max_asics: maxAsics },
     resolved_network: {
       tp_link_bw_gbs: tpLinkBw,
       tp_link_latency_us: tpLinkLatencyUs,
       pp_link_bw_gbs: ppLinkBw,
       pp_link_latency_us: ppLinkLatencyUs,
       overlap_fraction: overlapFraction,
+      intranode_bw_gbs: intranodeBw,
+      intranode_lat_us: intranodeLatUs,
+      internode_bw_gbs: internodeBw,
+      internode_lat_us: internodeLatUs,
+      gpus_per_node: gpusPerNode,
+      ep_uses_internode: ep > gpusPerNode,
     },
     stage_layout: stages,
     layer_collective: layerCollective,
@@ -186,15 +274,19 @@ export function computeParallelNetwork(workload, layerRecords, parallel = {}, ne
       tp_allreduce_bytes: tpAllreduceBytes,
       pp_send_count: ppSendCount,
       pp_send_bytes: ppSendBytes,
+      ep_alltoall_count: epAlltoallCount,
+      ep_alltoall_bytes: epAlltoallBytes,
       tp_time_ms: tpTimeS * 1e3,
       pp_time_ms: ppTimeS * 1e3,
+      ep_time_ms: epTimeS * 1e3,
       tp_latency_ms: tpLatencyS * 1e3,
       pp_latency_ms: ppLatencyS * 1e3,
+      ep_latency_ms: epLatencyS * 1e3,
       tp_bandwidth_ms: tpBandwidthS * 1e3,
       pp_bandwidth_ms: ppBandwidthS * 1e3,
-      network_time_ms: (tpTimeS + ppTimeS) * 1e3,
+      ep_bandwidth_ms: epBandwidthS * 1e3,
+      network_time_ms: (tpTimeS + ppTimeS + epTimeS) * 1e3,
     },
     workload_phase: workload?.phase === "prefill" ? "prefill" : "decode",
   };
 }
-

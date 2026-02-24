@@ -54,6 +54,7 @@ export function aggregateOps(ops) {
 export function computeWorkloadModel(workload, bytesPerElement = defaultBytesPerElement) {
   const model = workload?.model || {};
   const precision = workload?.precision || {};
+  const moe = workload?.moe || null;
 
   const L = toPositiveInt(model.L, 1);
   const H = toPositiveInt(model.H, 1);
@@ -74,6 +75,14 @@ export function computeWorkloadModel(workload, bytesPerElement = defaultBytesPer
   const oB = aB;
   const dkv = nkv * dh;
   const cp = precision.computeAs || "FP16";
+
+  // MoE parameters (validated)
+  const hasMoe = moe != null;
+  const numExperts = hasMoe ? toPositiveInt(moe.num_experts, 8) : 0;
+  const expertsPerToken = hasMoe ? toPositiveInt(moe.experts_per_token, 2) : 0;
+  const expertFfnDim = hasMoe ? toPositiveInt(moe.expert_ffn_dim, dff) : dff;
+  const capacityFactor = hasMoe ? Math.max(1.0, Number(moe.capacity_factor) || 1.25) : 1.0;
+  const moeLayerFreq = hasMoe ? toPositiveInt(moe.moe_layer_freq, 1) : 1;
 
   const ops = [];
   const layers = [];
@@ -115,6 +124,7 @@ export function computeWorkloadModel(workload, bytesPerElement = defaultBytesPer
       addOp({ name, type: "elementwise", flops, bytes, weight_bytes: 0 });
     };
 
+    // Attention sub-layers (always dense)
     addGemm("q_proj", B * T, H, H);
     addGemm("k_proj", B * T, dkv, H);
     addGemm("v_proj", B * T, dkv, H);
@@ -124,19 +134,54 @@ export function computeWorkloadModel(workload, bytesPerElement = defaultBytesPer
     addGemm("o_proj", B * T, H, H);
     addElementwise("rmsnorm", 5 * B * T * H, 2 * B * T * H * aB);
 
-    if (gate) {
-      addGemm("gate_proj", B * T, dff, H);
-      addGemm("up_proj", B * T, dff, H);
-      addElementwise("silu_mul", 3 * B * T * dff, 3 * B * T * dff * aB);
+    // Determine if this is a MoE FFN layer
+    const isMoeLayer = hasMoe && (layer % moeLayerFreq === 0);
+
+    if (isMoeLayer) {
+      // Router: small GEMM from hidden→num_experts
+      addGemm("router", B * T, numExperts, H);
+
+      // Effective tokens dispatched to each expert (accounting for capacity and top-K routing)
+      const effectiveTokens = Math.max(1, Math.round(
+        B * T * (expertsPerToken / numExperts) * capacityFactor,
+      ));
+
+      // Expert FFN ops (SwiGLU style within experts)
+      if (gate) {
+        addGemm("expert_gate", effectiveTokens, expertFfnDim, H);
+        addGemm("expert_up", effectiveTokens, expertFfnDim, H);
+        addElementwise(
+          "expert_silu_mul",
+          3 * effectiveTokens * expertFfnDim,
+          3 * effectiveTokens * expertFfnDim * aB,
+        );
+      } else {
+        addGemm("expert_up", effectiveTokens, expertFfnDim, H);
+      }
+      addGemm("expert_down", effectiveTokens, H, expertFfnDim);
     } else {
-      addGemm("up_proj", B * T, dff, H);
+      // Dense FFN
+      if (gate) {
+        addGemm("gate_proj", B * T, dff, H);
+        addGemm("up_proj", B * T, dff, H);
+        addElementwise("silu_mul", 3 * B * T * dff, 3 * B * T * dff * aB);
+      } else {
+        addGemm("up_proj", B * T, dff, H);
+      }
+      addGemm("down_proj", B * T, H, dff);
     }
 
-    addGemm("down_proj", B * T, H, dff);
     addElementwise("residual", 2 * B * T * H, 6 * B * T * H * aB);
+
+    // Expert sync points for EP all-to-all (only on MoE layers)
+    const expertSyncPoints = isMoeLayer ? [
+      { name: "expert_dispatch", tensor_bytes: tokenActivationBytes },
+      { name: "expert_gather",   tensor_bytes: tokenActivationBytes },
+    ] : [];
 
     layers.push({
       layer,
+      is_moe_layer: isMoeLayer,
       input_bytes: tokenActivationBytes,
       output_bytes: tokenActivationBytes,
       weight_bytes: layerWeightBytes,
@@ -153,6 +198,7 @@ export function computeWorkloadModel(workload, bytesPerElement = defaultBytesPer
           tensor_bytes: tokenActivationBytes,
         },
       ],
+      expert_sync_points: expertSyncPoints,
       ops: layerOps,
     });
   }
@@ -179,6 +225,7 @@ export function computeWorkloadModel(workload, bytesPerElement = defaultBytesPer
     seq_len: S,
     token_count: T,
     model: { L, H, nh, nkv, dh, dff, V, gate },
+    moe: hasMoe ? { numExperts, expertsPerToken, expertFfnDim, capacityFactor, moeLayerFreq } : null,
     precision: {
       w: precision.w || "FP16",
       a: precision.a || "FP16",
@@ -196,4 +243,3 @@ export function computeWorkloadModel(workload, bytesPerElement = defaultBytesPer
     },
   };
 }
-

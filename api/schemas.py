@@ -361,6 +361,124 @@ class MoEWorkloadSpec(BaseModel):
     load_imbalance: float = 0.15  # Expected load imbalance
 
 
+class AdvancedLayerSpec(BaseModel):
+    """Layer specification for advanced roofline analysis."""
+    name: str
+    M: int  # Output rows
+    N: int  # Output columns
+    K: int  # Inner dimension
+    input_precision_bits: int = 8
+    accumulator_precision_bits: int = 32
+
+
+class AdvancedRooflineResult(BaseModel):
+    """Advanced roofline analysis result with utilization, memory hierarchy, and mixed precision."""
+    # Performance
+    actual_tops: float
+    latency_ms: float
+    latency_us: float
+
+    # Roofline components
+    peak_compute_tops: float
+    effective_compute_tops: float
+    mem_bound_tops: float
+    arithmetic_intensity: float
+
+    # Utilization (LEVEL 2)
+    utilization: float
+    padded_m: int
+    padded_n: int
+    useful_ops: int
+    total_hw_ops: int
+
+    # Memory (LEVEL 1 & 3)
+    mem_tier: str  # "SRAM (On-Chip)" or "DRAM (Off-Chip)"
+    total_data_bytes: float
+    input_bytes: float
+    output_bytes: float
+
+    # Bottleneck
+    bottleneck: str  # "COMPUTE", "UTILIZATION", or "MEMORY"
+
+    # Hardware info
+    hardware: str
+    input_precision_bits: int
+    accumulator_precision_bits: int
+
+
+class BatchSweepRequest(BaseModel):
+    """Request to sweep batch sizes for utilization analysis."""
+    layer: AdvancedLayerSpec
+    batch_sizes: List[int]
+
+
+class BatchSweepResult(BaseModel):
+    """Result from batch size sweep."""
+    batch_size: int
+    result: AdvancedRooflineResult
+
+
+# ═══════════════════════════════════════════════
+#  OPTIMIZER SCHEMAS
+# ═══════════════════════════════════════════════
+
+class OptimizationTargetInput(BaseModel):
+    """Optimization target constraints."""
+    latency_ms: Optional[float] = None
+    throughput_tok_s: Optional[float] = None
+    max_nodes: int = 8
+    max_asics: int = 64
+
+
+class RankedConfigResult(BaseModel):
+    """A ranked hardware+parallelism configuration from optimizer search."""
+    tp: int
+    pp: int
+    ep: int
+    nodes: int
+    precision: str
+    predicted_latency_ms: float
+    predicted_throughput_tok_s: float
+    bottleneck: str
+    pareto_optimal: bool
+    score: float
+    ep_uses_internode: bool = False
+    network_time_ms: float = 0.0
+    ep_time_ms: float = 0.0
+    note: str = ""
+
+
+class OptimizerSearchRequest(BaseModel):
+    """Request to search for optimal hardware configurations."""
+    workload: WorkloadSpec
+    hardware: SizingHardwareSpec
+    target: OptimizationTargetInput
+    network: Union[SizingNetworkSpec, MultiNodeNetworkSpec] = None
+    tp_candidates: Optional[List[int]] = None
+    pp_candidates: Optional[List[int]] = None
+    ep_candidates: Optional[List[int]] = None
+    precision_candidates: Optional[List[str]] = None
+
+
+class OptimizerSearchResponse(BaseModel):
+    """Response from optimizer search."""
+    configs: List[RankedConfigResult]
+    pareto_count: int
+    total_searched: int
+
+
+class SuggestNextRequest(BaseModel):
+    """Request for next-step suggestion based on run history."""
+    run_history: List[Dict]
+
+
+class SuggestNextResult(BaseModel):
+    """Next optimization step recommendation."""
+    action: str
+    reason: str
+    suggested_change: str
+
+
 class MoEAnalysisResult(BaseModel):
     """MoE layer performance analysis result."""
     # Router

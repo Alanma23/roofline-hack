@@ -514,6 +514,7 @@ export default function InferenceSizingPanel({
 
   const [tp, setTp] = useState(2);
   const [pp, setPp] = useState(1);
+  const [ep, setEp] = useState(1);
   const [podSize, setPodSize] = useState(8);
   const [constrainToPod, setConstrainToPod] = useState(true);
   const [podTargetMode, setPodTargetMode] = useState("at_most");
@@ -524,7 +525,24 @@ export default function InferenceSizingPanel({
   const [ppLinkLatUs, setPpLinkLatUs] = useState(3);
   const [overlap, setOverlap] = useState(0);
 
-  // Multi-node network state
+  // EP intranode/internode network state
+  const [intranodeBw, setIntranodeBw] = useState(
+    numberValue(hardwarePresets[currentHardwareName]?.intranode_bw_gbs, 900, 1),
+  );
+  const [intranodeLatUs, setIntranodeLatUs] = useState(
+    numberValue(hardwarePresets[currentHardwareName]?.intranode_lat_us, 1, 0),
+  );
+  const [internodeBw, setInternodeBw] = useState(
+    numberValue(hardwarePresets[currentHardwareName]?.internode_bw_gbs, 25, 1),
+  );
+  const [internodeLatUs, setInternodeLatUs] = useState(
+    numberValue(hardwarePresets[currentHardwareName]?.internode_lat_us, 5, 0),
+  );
+  const [gpusPerNodeEP, setGpusPerNodeEP] = useState(
+    intValue(hardwarePresets[currentHardwareName]?.gpus_per_node, 8),
+  );
+
+  // Multi-node network state (legacy)
   const [useMultiNode, setUseMultiNode] = useState(false);
   const [gpusPerNode, setGpusPerNode] = useState(8);
   const [intraBw, setIntraBw] = useState(900);
@@ -549,6 +567,12 @@ export default function InferenceSizingPanel({
     setOffchipBw(baseBw);
     setOnchipBw(Math.max(baseBw * 32, 10000));
     setHardwareFlops({ ...(preset.flops || { FP16: 62 }) });
+    // Update EP network params from preset
+    if (preset.intranode_bw_gbs != null) setIntranodeBw(numberValue(preset.intranode_bw_gbs, 900, 1));
+    if (preset.intranode_lat_us != null) setIntranodeLatUs(numberValue(preset.intranode_lat_us, 1, 0));
+    if (preset.internode_bw_gbs != null) setInternodeBw(numberValue(preset.internode_bw_gbs, 25, 1));
+    if (preset.internode_lat_us != null) setInternodeLatUs(numberValue(preset.internode_lat_us, 5, 0));
+    if (preset.gpus_per_node != null) setGpusPerNodeEP(intValue(preset.gpus_per_node, 8));
   }, [hardwareChoice, hardwarePresets]);
 
   useEffect(() => {
@@ -556,9 +580,15 @@ export default function InferenceSizingPanel({
     if (viewMode === "decode" && phase !== "decode") setPhase("decode");
   }, [viewMode, phase]);
 
-  const activeModel = useMemo(() => (
-    modelChoice === CUSTOM_MODEL ? customModel : (models[modelChoice] || customModel)
-  ), [modelChoice, models, customModel]);
+  const activeModel = useMemo(() => {
+    const m = modelChoice === CUSTOM_MODEL ? customModel : (models[modelChoice] || customModel);
+    return m;
+  }, [modelChoice, models, customModel]);
+
+  const activeMoe = useMemo(() => {
+    if (modelChoice === CUSTOM_MODEL) return null;
+    return models[modelChoice]?.moe || null;
+  }, [modelChoice, models]);
 
   const activePrecision = useMemo(
     () => configs[configChoice] || { w: "FP16", a: "FP16", kv: "FP16", computeAs: "FP16" },
@@ -615,6 +645,7 @@ export default function InferenceSizingPanel({
         gate: Boolean(activeModel.gate),
       },
       precision: activePrecision,
+      moe: activeMoe || undefined,
     },
     hardware: {
       name: hardwareChoice,
@@ -632,6 +663,7 @@ export default function InferenceSizingPanel({
     parallel: {
       tp: intValue(tp, 1),
       pp: intValue(pp, 1),
+      ep: intValue(ep, 1),
       max_asics: maxAsicsEffective,
     },
     network: useMultiNode ? {
@@ -647,13 +679,20 @@ export default function InferenceSizingPanel({
       pp_link_bw_gbs: numberValue(ppLinkBw, tpLinkBw, 0.1),
       pp_link_latency_us: numberValue(ppLinkLatUs, tpLinkLatUs, 0),
       overlap_fraction: Math.max(0, Math.min(1, numberValue(overlap, 0, 0))),
+      // EP network topology
+      intranode_bw_gbs: numberValue(intranodeBw, 900, 0.1),
+      intranode_lat_us: numberValue(intranodeLatUs, 1, 0),
+      internode_bw_gbs: numberValue(internodeBw, 25, 0.1),
+      internode_lat_us: numberValue(internodeLatUs, 5, 0),
+      gpus_per_node: intValue(gpusPerNodeEP, 8),
     },
   }), [
-    phase, batch, effectiveSeqLen, activeModel, activePrecision,
+    phase, batch, effectiveSeqLen, activeModel, activeMoe, activePrecision,
     hardwareChoice, hardwareFlops, memBw,
     memoryMode, onchipBw, offchipBw, onchipHitRate,
-    tp, pp, maxAsicsEffective, tpLinkBw, ppLinkBw, tpLinkLatUs, ppLinkLatUs, overlap,
+    tp, pp, ep, maxAsicsEffective, tpLinkBw, ppLinkBw, tpLinkLatUs, ppLinkLatUs, overlap,
     useMultiNode, gpusPerNode, intraBw, intraLat, interBw, interLat,
+    intranodeBw, intranodeLatUs, internodeBw, internodeLatUs, gpusPerNodeEP,
   ]);
 
   const sizingOptions = useMemo(() => ({ bytesPerElement, hwFlopsKey }), [bytesPerElement, hwFlopsKey]);
@@ -674,9 +713,10 @@ export default function InferenceSizingPanel({
       ...sizingOptions,
       tp_candidates: [1, 2, 4, 8, 16],
       pp_candidates: [1, 2, 4, 8],
+      ep_candidates: activeMoe ? [1, 2, 4, 8] : [1],
       top_k: 64,
     }),
-    [request, sizingOptions],
+    [request, sizingOptions, activeMoe],
   );
 
   const recommendations = useMemo(() => {
@@ -955,12 +995,32 @@ export default function InferenceSizingPanel({
             <input type="number" min={1} value={pp} onChange={(e) => setPp(intValue(e.target.value, pp))} style={input} />
           </label>
           <label>
+            <span style={label}>EP degree {activeMoe ? "(MoE)" : "(no MoE)"}</span>
+            <select value={ep} onChange={(e) => setEp(intValue(e.target.value, 1))} style={input}>
+              {[1, 2, 4, 8, 16].map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </label>
+          <label>
             <span style={label}>TP BW (GB/s)</span>
             <input type="number" min={0.1} value={tpLinkBw} onChange={(e) => setTpLinkBw(numberValue(e.target.value, tpLinkBw, 0.1))} style={input} />
           </label>
           <label>
             <span style={label}>PP BW (GB/s)</span>
             <input type="number" min={0.1} value={ppLinkBw} onChange={(e) => setPpLinkBw(numberValue(e.target.value, ppLinkBw, 0.1))} style={input} />
+          </label>
+          <label>
+            <span style={label}>Intranode BW (GB/s)</span>
+            <input type="number" min={0.1} value={intranodeBw} onChange={(e) => setIntranodeBw(numberValue(e.target.value, intranodeBw, 0.1))} style={input} />
+          </label>
+          <label>
+            <span style={label}>Internode BW (GB/s)</span>
+            <input type="number" min={0.1} value={internodeBw} onChange={(e) => setInternodeBw(numberValue(e.target.value, internodeBw, 0.1))} style={input} />
+          </label>
+          <label>
+            <span style={label}>GPUs/node (EP topology)</span>
+            <input type="number" min={1} value={gpusPerNodeEP} onChange={(e) => setGpusPerNodeEP(intValue(e.target.value, gpusPerNodeEP))} style={input} />
           </label>
         </div>
 
@@ -1136,8 +1196,20 @@ export default function InferenceSizingPanel({
             <div style={{ fontSize: 9, color: "#94a3b8", lineHeight: 1.7 }}>
               <div>TP all-reduces: {result.collective.tp_allreduce_count} · {fmtBytes(result.collective.tp_allreduce_bytes)}</div>
               <div>PP sends: {result.collective.pp_send_count} · {fmtBytes(result.collective.pp_send_bytes)}</div>
+              {result.collective.ep_alltoall_count > 0 && (
+                <div style={{ color: result.metadata?.network?.ep_uses_internode ? "#f97316" : "#a78bfa" }}>
+                  EP all-to-all: {result.collective.ep_alltoall_count} · {fmtBytes(result.collective.ep_alltoall_bytes)}
+                  {result.metadata?.network?.ep_uses_internode ? " ⚠ cross-node (IB)" : " (NVLink)"}
+                </div>
+              )}
               {result.required_to_debottleneck.network_bw_gbs && (
                 <div style={{ color: "#fbbf24" }}>Need ~{result.required_to_debottleneck.network_bw_gbs.toFixed(1)} GB/s link to debottleneck network</div>
+              )}
+              {result.required_to_debottleneck.intranode_bw_gbs && (
+                <div style={{ color: "#a78bfa" }}>EP intranode: need ~{result.required_to_debottleneck.intranode_bw_gbs.toFixed(1)} GB/s NVLink</div>
+              )}
+              {result.required_to_debottleneck.internode_bw_gbs && (
+                <div style={{ color: "#f97316" }}>EP cross-node: need ~{result.required_to_debottleneck.internode_bw_gbs.toFixed(1)} GB/s IB (currently bottlenecked)</div>
               )}
               {result.required_to_debottleneck.mem_bw_gbs && (
                 <div style={{ color: "#fbbf24" }}>Need ~{result.required_to_debottleneck.mem_bw_gbs.toFixed(1)} GB/s effective memory BW to debottleneck memory</div>
@@ -1153,28 +1225,44 @@ export default function InferenceSizingPanel({
 
           <div style={panel}>
             <div style={{ fontSize: 9, color: "#475569", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 4 }}>
-              Best TP/PP Picks (within current pod/ASIC constraint)
+              TP/PP/EP Pareto Configs (within current pod/ASIC constraint)
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 8 }}>
               <thead>
                 <tr style={{ color: "#64748b" }}>
-                  <th align="left">tp</th>
-                  <th align="left">pp</th>
+                  <th align="left">Pareto</th>
+                  <th align="left">TP</th>
+                  <th align="left">PP</th>
+                  <th align="left">EP</th>
                   <th align="left">ASICs</th>
+                  <th align="left">Bottleneck</th>
                   <th align="right">Latency</th>
                 </tr>
               </thead>
               <tbody>
                 {recommendations.length === 0 ? (
                   <tr style={{ color: "#94a3b8" }}>
-                    <td colSpan={4}>No valid TP/PP split under current pod target mode.</td>
+                    <td colSpan={7}>No valid TP/PP/EP split under current pod target mode.</td>
                   </tr>
                 ) : (
                   recommendations.map((row, idx) => (
-                    <tr key={`${row.tp}-${row.pp}-${idx}`} style={{ color: idx === 0 ? "#22c55e" : "#94a3b8" }}>
+                    <tr
+                      key={`${row.tp}-${row.pp}-${row.ep || 1}-${idx}`}
+                      style={{ color: row.pareto_optimal ? "#22c55e" : "#94a3b8" }}
+                    >
+                      <td style={{ color: row.pareto_optimal ? "#fbbf24" : "#334155" }}>
+                        {row.pareto_optimal ? "★" : "·"}
+                      </td>
                       <td>{row.tp}</td>
                       <td>{row.pp}</td>
+                      <td style={{ color: (row.ep || 1) > 1 ? "#a78bfa" : "inherit" }}>
+                        {row.ep || 1}
+                        {row.ep_uses_internode ? " ⚠" : ""}
+                      </td>
                       <td>{row.asics}</td>
+                      <td style={{ color: row.bottleneck === "network" ? "#f59e0b" : row.bottleneck === "compute" ? "#ef4444" : "#60a5fa" }}>
+                        {row.bottleneck}
+                      </td>
                       <td align="right">{fmtMs(row.latency_ms)}</td>
                     </tr>
                   ))
@@ -1184,6 +1272,9 @@ export default function InferenceSizingPanel({
             {recommendations[0] && (
               <div style={{ marginTop: 5, fontSize: 8, color: "#fbbf24" }}>{recommendations[0].note}</div>
             )}
+            <div style={{ fontSize: 7, color: "#475569", marginTop: 4 }}>
+              ★ = Pareto-optimal (not dominated on latency+ASICs) · ⚠ = EP crosses node boundary (uses IB)
+            </div>
           </div>
 
           <div style={panel}>

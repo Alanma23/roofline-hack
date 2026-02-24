@@ -26,8 +26,10 @@ Single-server deployment (app + API for anyone on the site):
 
 import sys
 import asyncio
+import json
+import sqlite3
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
@@ -56,6 +58,9 @@ from api.schemas import (
     ExportRunsRequest, ExportRunsResponse, ImportRunsRequest, ImportRunsResponse,
     ComparisonMetric,
     MoEConfig, MoEWorkloadSpec, MoEAnalysisResult,
+    AdvancedLayerSpec, AdvancedRooflineResult, BatchSweepRequest, BatchSweepResult,
+    OptimizationTargetInput, RankedConfigResult, OptimizerSearchRequest, OptimizerSearchResponse,
+    SuggestNextRequest, SuggestNextResult,
 )
 
 app = FastAPI(title="Blackwell GEMM Roofline Analyzer", version="1.0.0")
@@ -665,36 +670,125 @@ def public_import_benchmarks(req: FlexibleImportRequest):
 
 
 # ═══════════════════════════════════════════════
-#  RUN TRACKING ENDPOINTS
+#  SQLITE-BACKED RUN STORAGE
 # ═══════════════════════════════════════════════
 
-# In-memory run storage (migrate to database later)
-_run_storage: Dict[str, RunMetadata] = {}
+_DB_PATH = ROOT / "runs.db"
+
+
+class RunDB:
+    """SQLite-backed run storage (replaces in-memory dict)."""
+
+    def __init__(self, db_path: Path = _DB_PATH):
+        self.db_path = db_path
+        self._init_db()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self):
+        with self._conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS runs (
+                    run_id      TEXT PRIMARY KEY,
+                    timestamp   TEXT NOT NULL,
+                    name        TEXT NOT NULL,
+                    hardware_key TEXT NOT NULL,
+                    workload_type TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    results_json TEXT NOT NULL,
+                    tags_json   TEXT NOT NULL DEFAULT '[]',
+                    notes       TEXT NOT NULL DEFAULT ''
+                )
+            """)
+
+    def save(self, run: RunMetadata):
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO runs
+                    (run_id, timestamp, name, hardware_key, workload_type,
+                     config_json, results_json, tags_json, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                run.run_id, run.timestamp, run.name,
+                run.hardware_key, run.workload_type,
+                json.dumps(run.config), json.dumps(run.results),
+                json.dumps(run.tags), run.notes,
+            ))
+
+    def get(self, run_id: str) -> Optional[RunMetadata]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return RunMetadata(
+            run_id=row["run_id"],
+            timestamp=row["timestamp"],
+            name=row["name"],
+            hardware_key=row["hardware_key"],
+            workload_type=row["workload_type"],
+            config=json.loads(row["config_json"]),
+            results=json.loads(row["results_json"]),
+            tags=json.loads(row["tags_json"]),
+            notes=row["notes"],
+        )
+
+    def list(self, hardware_key: Optional[str] = None, workload_type: Optional[str] = None) -> List[RunMetadata]:
+        query = "SELECT * FROM runs WHERE 1=1"
+        params: List = []
+        if hardware_key:
+            query += " AND hardware_key = ?"
+            params.append(hardware_key)
+        if workload_type:
+            query += " AND workload_type = ?"
+            params.append(workload_type)
+        query += " ORDER BY timestamp DESC"
+
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [RunMetadata(
+            run_id=r["run_id"],
+            timestamp=r["timestamp"],
+            name=r["name"],
+            hardware_key=r["hardware_key"],
+            workload_type=r["workload_type"],
+            config=json.loads(r["config_json"]),
+            results=json.loads(r["results_json"]),
+            tags=json.loads(r["tags_json"]),
+            notes=r["notes"],
+        ) for r in rows]
+
+    def delete(self, run_id: str) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+        return cur.rowcount > 0
+
+
+_run_db = RunDB()
+
+
+# ═══════════════════════════════════════════════
+#  RUN TRACKING ENDPOINTS
+# ═══════════════════════════════════════════════
 
 
 @app.post("/api/runs/save")
 def save_run(req: SaveRunRequest):
-    """Save a run configuration and results."""
-    run_id = req.metadata.run_id
-    _run_storage[run_id] = req.metadata
-    return {"status": "saved", "run_id": run_id}
+    """Save a run configuration and results (persisted to SQLite)."""
+    _run_db.save(req.metadata)
+    return {"status": "saved", "run_id": req.metadata.run_id}
 
 
 @app.get("/api/runs/list", response_model=List[RunListItem])
 def list_runs(hardware_key: Optional[str] = None, workload_type: Optional[str] = None):
     """List saved runs with optional filters."""
-    runs = list(_run_storage.values())
+    runs = _run_db.list(hardware_key=hardware_key, workload_type=workload_type)
 
-    # Apply filters
-    if hardware_key:
-        runs = [r for r in runs if r.hardware_key == hardware_key]
-    if workload_type:
-        runs = [r for r in runs if r.workload_type == workload_type]
-
-    # Sort by timestamp (most recent first)
-    runs.sort(key=lambda r: r.timestamp, reverse=True)
-
-    # Build preview summaries
     items = []
     for r in runs:
         preview = {
@@ -717,17 +811,17 @@ def list_runs(hardware_key: Optional[str] = None, workload_type: Optional[str] =
 @app.get("/api/runs/{run_id}", response_model=RunMetadata)
 def load_run(run_id: str):
     """Load full run details."""
-    if run_id not in _run_storage:
+    run = _run_db.get(run_id)
+    if run is None:
         raise HTTPException(404, f"Run '{run_id}' not found")
-    return _run_storage[run_id]
+    return run
 
 
 @app.delete("/api/runs/{run_id}")
 def delete_run(run_id: str):
     """Delete a run."""
-    if run_id not in _run_storage:
+    if not _run_db.delete(run_id):
         raise HTTPException(404, f"Run '{run_id}' not found")
-    del _run_storage[run_id]
     return {"status": "deleted", "run_id": run_id}
 
 
@@ -736,9 +830,10 @@ def compare_runs(req: CompareRunsRequest):
     """Compare multiple runs side-by-side."""
     runs = []
     for run_id in req.run_ids:
-        if run_id not in _run_storage:
+        run = _run_db.get(run_id)
+        if run is None:
             raise HTTPException(404, f"Run '{run_id}' not found")
-        runs.append(_run_storage[run_id])
+        runs.append(run)
 
     if not runs:
         return CompareRunsResponse(runs=[], comparison_table=[])
@@ -775,9 +870,10 @@ def export_runs(req: ExportRunsRequest):
     """Export runs as JSON for sharing."""
     runs = []
     for run_id in req.run_ids:
-        if run_id not in _run_storage:
+        run = _run_db.get(run_id)
+        if run is None:
             raise HTTPException(404, f"Run '{run_id}' not found")
-        runs.append(_run_storage[run_id])
+        runs.append(run)
     return ExportRunsResponse(runs=runs)
 
 
@@ -789,7 +885,7 @@ def import_runs(req: ImportRunsRequest):
 
     for run in req.runs:
         try:
-            _run_storage[run.run_id] = run
+            _run_db.save(run)
             imported += 1
         except Exception as e:
             errors.append(f"Run {run.run_id}: {str(e)}")
@@ -839,6 +935,216 @@ def analyze_moe(spec: MoEWorkloadSpec, hardware_key: str = "b10", use_efficiency
     )
 
     return MoEAnalysisResult(**result)
+
+
+# ═══════════════════════════════════════════════
+#  ADVANCED ROOFLINE ENDPOINTS
+# ═══════════════════════════════════════════════
+
+@app.post("/api/advanced/analyze", response_model=AdvancedRooflineResult)
+def analyze_advanced(spec: AdvancedLayerSpec, hardware_key: str = "b10"):
+    """
+    Advanced roofline analysis with:
+    - LEVEL 1: Memory hierarchy (SRAM vs DRAM)
+    - LEVEL 2: Array utilization (padding penalty)
+    - LEVEL 3: Mixed precision (input vs accumulator bits)
+
+    This provides a more realistic performance model than naive roofline.
+
+    Args:
+        spec: Layer specification (M, N, K, precision bits)
+        hardware_key: Hardware to analyze ("b10", "tpu_v3", etc.)
+
+    Returns:
+        Advanced roofline result with utilization, memory tier, bottleneck
+    """
+    from src.roofline.advanced_roofline import (
+        AdvancedRooflineSim,
+        LayerSpec,
+        create_blackwell_b10_advanced,
+        create_tpu_v3_like,
+    )
+
+    # Select hardware
+    if hardware_key == "b10":
+        hw = create_blackwell_b10_advanced()
+    elif hardware_key == "tpu_v3":
+        hw = create_tpu_v3_like()
+    else:
+        raise HTTPException(404, f"Advanced hardware '{hardware_key}' not supported. Use 'b10' or 'tpu_v3'.")
+
+    # Create layer
+    layer = LayerSpec(
+        name=spec.name,
+        M=spec.M,
+        N=spec.N,
+        K=spec.K,
+    )
+
+    # Run analysis
+    sim = AdvancedRooflineSim(hw)
+    result = sim.run_analysis(
+        layer,
+        input_precision_bits=spec.input_precision_bits,
+        accumulator_precision_bits=spec.accumulator_precision_bits,
+        verbose=False,  # Disable console output for API
+    )
+
+    return AdvancedRooflineResult(**result)
+
+
+@app.post("/api/advanced/batch-sweep", response_model=List[BatchSweepResult])
+def batch_sweep_advanced(req: BatchSweepRequest, hardware_key: str = "b10"):
+    """
+    Sweep batch sizes to analyze utilization impact.
+
+    This is critical for understanding inference performance (small batches)
+    vs training performance (large batches).
+
+    Args:
+        req: Batch sweep request with layer template and batch sizes
+        hardware_key: Hardware to analyze
+
+    Returns:
+        List of results for each batch size
+    """
+    from src.roofline.advanced_roofline import (
+        AdvancedRooflineSim,
+        LayerSpec,
+        create_blackwell_b10_advanced,
+        create_tpu_v3_like,
+    )
+
+    # Select hardware
+    if hardware_key == "b10":
+        hw = create_blackwell_b10_advanced()
+    elif hardware_key == "tpu_v3":
+        hw = create_tpu_v3_like()
+    else:
+        raise HTTPException(404, f"Advanced hardware '{hardware_key}' not supported")
+
+    # Run sweep
+    sim = AdvancedRooflineSim(hw)
+    layer_template = LayerSpec(
+        name=req.layer.name,
+        M=0,  # Will be replaced by batch sizes
+        N=req.layer.N,
+        K=req.layer.K,
+    )
+
+    results = sim.compare_batch_sizes(
+        layer_template,
+        batch_sizes=req.batch_sizes,
+        input_precision_bits=req.layer.input_precision_bits,
+        accumulator_precision_bits=req.layer.accumulator_precision_bits,
+    )
+
+    # Format response
+    return [
+        BatchSweepResult(
+            batch_size=batch,
+            result=AdvancedRooflineResult(**res)
+        )
+        for batch, res in zip(req.batch_sizes, results)
+    ]
+
+
+# ═══════════════════════════════════════════════
+#  OPTIMIZER ENDPOINTS
+# ═══════════════════════════════════════════════
+
+@app.post("/api/optimizer/search", response_model=OptimizerSearchResponse)
+def optimizer_search(req: OptimizerSearchRequest):
+    """
+    Target-driven hardware optimizer: given workload + performance target,
+    sweep TP/PP/EP/precision space and return ranked configs.
+    """
+    from src.roofline.optimizer import optimize_hardware, OptimizationTarget
+
+    workload_dict = req.workload.model_dump() if hasattr(req.workload, "model_dump") else req.workload.dict()
+    hardware_dict = req.hardware.model_dump() if hasattr(req.hardware, "model_dump") else req.hardware.dict()
+    network_dict = {}
+    if req.network:
+        network_dict = req.network.model_dump() if hasattr(req.network, "model_dump") else req.network.dict()
+
+    target = OptimizationTarget(
+        latency_ms=req.target.latency_ms,
+        throughput_tok_s=req.target.throughput_tok_s,
+        max_nodes=req.target.max_nodes,
+        max_asics=req.target.max_asics,
+    )
+
+    config_space = {
+        "hardware": hardware_dict,
+        "network": network_dict,
+    }
+    if req.tp_candidates:
+        config_space["tp"] = req.tp_candidates
+    if req.pp_candidates:
+        config_space["pp"] = req.pp_candidates
+    if req.ep_candidates:
+        config_space["ep"] = req.ep_candidates
+    if req.precision_candidates:
+        config_space["precision"] = req.precision_candidates
+
+    ranked = optimize_hardware(workload_dict, target, config_space)
+
+    configs = [
+        RankedConfigResult(
+            tp=c.tp, pp=c.pp, ep=c.ep, nodes=c.nodes, precision=c.precision,
+            predicted_latency_ms=c.predicted_latency_ms,
+            predicted_throughput_tok_s=c.predicted_throughput_tok_s,
+            bottleneck=c.bottleneck,
+            pareto_optimal=c.pareto_optimal,
+            score=c.score,
+            ep_uses_internode=c.ep_uses_internode,
+            network_time_ms=c.network_time_ms,
+            ep_time_ms=c.ep_time_ms,
+        )
+        for c in ranked
+    ]
+    pareto_count = sum(1 for c in configs if c.pareto_optimal)
+
+    return OptimizerSearchResponse(
+        configs=configs,
+        pareto_count=pareto_count,
+        total_searched=len(configs),
+    )
+
+
+@app.get("/api/optimizer/pareto")
+def optimizer_pareto(hardware_key: Optional[str] = None, workload_type: Optional[str] = None):
+    """
+    Return Pareto-optimal configs from recent runs (filtered by hardware/workload).
+    """
+    runs = _run_db.list(hardware_key=hardware_key, workload_type=workload_type)
+    pareto_runs = [r for r in runs if r.results.get("pareto_optimal", False)]
+    return {"pareto_configs": [r.results for r in pareto_runs], "total": len(pareto_runs)}
+
+
+@app.post("/api/optimizer/suggest-next", response_model=SuggestNextResult)
+def optimizer_suggest_next(req: SuggestNextRequest):
+    """
+    Analyze run history and recommend the next optimization step.
+    """
+    from src.roofline.optimizer import suggest_next_step
+    suggestion = suggest_next_step(req.run_history)
+    return SuggestNextResult(**suggestion)
+
+
+@app.get("/api/optimizer/history")
+def optimizer_history():
+    """All optimizer runs with trend analysis."""
+    runs = _run_db.list()
+    bottlenecks = [r.results.get("bottleneck", "unknown") for r in runs]
+    trend = {
+        "total_runs": len(runs),
+        "network_bottleneck_pct": (bottlenecks.count("network") / len(bottlenecks) * 100) if bottlenecks else 0,
+        "memory_bottleneck_pct": (bottlenecks.count("memory") / len(bottlenecks) * 100) if bottlenecks else 0,
+        "compute_bottleneck_pct": (bottlenecks.count("compute") / len(bottlenecks) * 100) if bottlenecks else 0,
+        "runs": [{"run_id": r.run_id, "name": r.name, "timestamp": r.timestamp, "results": r.results} for r in runs[:50]],
+    }
+    return trend
 
 
 app.include_router(public_router)

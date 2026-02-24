@@ -60,14 +60,38 @@ function resolvePeakTflops(hardware, computeAs, hwFlopsKey) {
   );
 }
 
-function computeRequiredSizing(bottleneck, totals, time, collective, memoryModel) {
+function computeRequiredSizing(bottleneck, totals, time, collective, memoryModel, network) {
   const result = {};
+
   if (bottleneck === "network") {
     const targetS = Math.max(time.compute_s, time.memory_s);
-    const fixedLatencyS = ((collective.tp_latency_ms || 0) + (collective.pp_latency_ms || 0)) * 1e-3;
-    const variableBytes = (collective.tp_allreduce_bytes || 0) + (collective.pp_send_bytes || 0);
+    const fixedLatencyS = (
+      (collective.tp_latency_ms || 0)
+      + (collective.pp_latency_ms || 0)
+      + (collective.ep_latency_ms || 0)
+    ) * 1e-3;
+    const variableBytes = (
+      (collective.tp_allreduce_bytes || 0)
+      + (collective.pp_send_bytes || 0)
+      + (collective.ep_alltoall_bytes || 0)
+    );
+
     if (targetS > fixedLatencyS && variableBytes > 0) {
       result.network_bw_gbs = variableBytes / (targetS - fixedLatencyS) / 1e9;
+    }
+
+    // If EP dominates: report required intranode or internode BW
+    if (collective.ep_alltoall_bytes > 0) {
+      const epTarget = Math.max(time.compute_s, time.memory_s);
+      const epFixed = (collective.ep_latency_ms || 0) * 1e-3;
+      if (epTarget > epFixed && collective.ep_alltoall_bytes > 0) {
+        const reqBw = collective.ep_alltoall_bytes / (epTarget - epFixed) / 1e9;
+        if (network?.ep_uses_internode) {
+          result.internode_bw_gbs = reqBw;
+        } else {
+          result.intranode_bw_gbs = reqBw;
+        }
+      }
     }
   } else if (bottleneck === "memory") {
     const targetS = Math.max(time.compute_s, time.network_s);
@@ -140,6 +164,7 @@ export function computeSizing(request, options = {}) {
     { compute_s: computeS, memory_s: memoryS, network_s: networkS },
     networkData.totals,
     memoryModel,
+    networkData.resolved_network,
   );
 
   const byLayerCollective = new Map(
@@ -151,11 +176,13 @@ export function computeSizing(request, options = {}) {
     return {
       layer: layer.layer + 1,
       stage: (c.stage ?? 0) + 1,
+      is_moe_layer: layer.is_moe_layer || false,
       input_bytes: layer.input_bytes,
       output_bytes: layer.output_bytes,
       weight_bytes: layer.weight_bytes,
       tp_sync_bytes: c.tp_sync_bytes || 0,
       pp_boundary_send_bytes: c.pp_boundary_send_bytes || 0,
+      ep_alltoall_bytes: c.ep_alltoall_bytes || 0,
     };
   });
 
@@ -174,6 +201,8 @@ export function computeSizing(request, options = {}) {
       tp_allreduce_bytes: networkData.totals.tp_allreduce_bytes,
       pp_send_count: networkData.totals.pp_send_count,
       pp_send_bytes: networkData.totals.pp_send_bytes,
+      ep_alltoall_count: networkData.totals.ep_alltoall_count,
+      ep_alltoall_bytes: networkData.totals.ep_alltoall_bytes,
     },
     time: {
       compute_ms: computeS * 1e3,
@@ -202,10 +231,13 @@ export function computeSizing(request, options = {}) {
       network_breakdown_ms: {
         tp_time_ms: networkData.totals.tp_time_ms,
         pp_time_ms: networkData.totals.pp_time_ms,
+        ep_time_ms: networkData.totals.ep_time_ms,
         tp_latency_ms: networkData.totals.tp_latency_ms,
         pp_latency_ms: networkData.totals.pp_latency_ms,
+        ep_latency_ms: networkData.totals.ep_latency_ms,
         tp_bandwidth_ms: networkData.totals.tp_bandwidth_ms,
         pp_bandwidth_ms: networkData.totals.pp_bandwidth_ms,
+        ep_bandwidth_ms: networkData.totals.ep_bandwidth_ms,
       },
     },
   };
